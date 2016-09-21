@@ -295,6 +295,10 @@ def addSEOptions(parser):
                       help="Redirect stdout to a file.")
     parser.add_option("--errout", default="",
                       help="Redirect stderr to a file.")
+    # weil0ng: add options to specify workloads.
+    parser.add_option("--benchmark", action="store", type="string",
+                      help=("Specify workloads, semi-colon"
+                          "sperated for each cpu."))
 
 def addFSOptions(parser):
     # Simulation options

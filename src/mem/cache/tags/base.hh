@@ -67,12 +67,21 @@ class BaseTags : public ClockedObject
   protected:
     /** The block size of the cache. */
     const unsigned blkSize;
+    /* weil0ng: word size in the memory system. */
+    const unsigned wordSize;
     /** The size of the cache. */
     const unsigned size;
     /** The access latency of the cache. */
     const Cycles accessLatency;
     /** Pointer to the parent cache. */
     BaseCache *cache;
+
+    /* weil0ng: Number of words in each blk. */
+    unsigned numWords;
+    /* weil0ng: The amount to shift the address to get the offset. */
+    int offsetShift;
+    /* weil0ng: Mask out all bits that aren't part of the offset. */
+    unsigned offsetMask;
 
     /**
      * The number of tags that need to be touched to meet the warmup
@@ -225,6 +234,9 @@ class BaseTags : public ClockedObject
 
     virtual CacheBlk* accessBlock(Addr addr, bool is_secure, Cycles &lat,
                                   int context_src) = 0;
+
+    /* weil0ng: stub for extracting offset. */
+    virtual Addr extractOffset(Addr addr) const = 0;
 
     virtual Addr extractTag(Addr addr) const = 0;
 

@@ -65,7 +65,7 @@
 #include "sim/sim_exit.hh"
 
 Cache::Cache(const CacheParams *p)
-    : BaseCache(p, p->system->cacheLineSize()),
+    : BaseCache(p, p->system->cacheLineSize(), p->system->wordSize()),
       tags(p->tags),
       prefetcher(p->prefetcher),
       doFastWrites(true),
@@ -1678,6 +1678,14 @@ Cache::allocateBlock(Addr addr, bool is_secure, PacketList &writebacks)
     if (blk->isValid()) {
         Addr repl_addr = tags->regenerateBlkAddr(blk->tag, blk->set);
         MSHR *repl_mshr = mshrQueue.findMatch(repl_addr, blk->isSecure());
+        /* weil0ng: compute cache line utilization at eviction time. */
+        int numWords = blkSize / wordSize;
+        int touched = 0;
+        for (int i=0; i<numWords; ++i) {
+            if ((blk->touchMask >> i) & 0x1)
+                ++touched;
+        }
+        ++utilPerBlk[touched];
         if (repl_mshr) {
             // must be an outstanding upgrade request
             // on a block we're about to replace...

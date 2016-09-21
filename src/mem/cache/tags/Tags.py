@@ -49,6 +49,9 @@ class BaseTags(ClockedObject):
     # Get the block size from the parent (system)
     block_size = Param.Int(Parent.cache_line_size, "block size in bytes")
 
+    # weil0ng: Get the word size from the parent (system)
+    word_size = Param.Int(Parent.word_size, "word size in bytes")
+
     # Get the hit latency from the parent (cache)
     hit_latency = Param.Cycles(Parent.hit_latency,
                                "The hit latency for this cache")

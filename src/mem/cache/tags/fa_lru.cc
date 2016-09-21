@@ -73,6 +73,9 @@ FALRU::FALRU(const Params *p)
         cacheMask = 0;
     }
 
+    /* weil0ng: set numWords. */
+    numWords = blkSize / wordSize;
+
     warmupBound = size/blkSize;
     numBlocks = size/blkSize;
 

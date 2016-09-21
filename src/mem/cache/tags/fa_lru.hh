@@ -273,6 +273,16 @@ public:
         return (addr & ~(Addr)(blkSize-1));
     }
 
+    /** weil0ng:
+     * Generate the offset from the given address.
+     * @param addr The address to get the offset from.
+     * @return The offset of the address.
+     */
+    Addr extractOffset(Addr addr) const override
+    {
+        return ((addr >> offsetShift) & offsetMask);
+    }
+
     /**
      * Generate the tag from the addres. For fully associative this is just the
      * block address.

@@ -190,6 +190,11 @@ class System : public MemObject
      */
     unsigned int cacheLineSize() const { return _cacheLineSize; }
 
+    /** weil0ng:
+     * Get the word size of the system.
+     */
+    unsigned int wordSize() const { return _wordSize; }
+
 #if THE_ISA != NULL_ISA
     PCEventQueue pcEventQueue;
 #endif
@@ -305,6 +310,9 @@ class System : public MemObject
     Enums::MemoryMode memoryMode;
 
     const unsigned int _cacheLineSize;
+
+    /* weil0ng: add word size. */
+    const unsigned int _wordSize;
 
     uint64_t workItemsBegin;
     uint64_t workItemsEnd;

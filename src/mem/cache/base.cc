@@ -66,12 +66,13 @@ BaseCache::CacheSlavePort::CacheSlavePort(const std::string &_name,
 {
 }
 
-BaseCache::BaseCache(const BaseCacheParams *p, unsigned blk_size)
+BaseCache::BaseCache(const BaseCacheParams *p, unsigned blk_size, unsigned word_size)
     : MemObject(p),
       cpuSidePort(nullptr), memSidePort(nullptr),
       mshrQueue("MSHRs", p->mshrs, 0, p->demand_mshr_reserve), // see below
       writeBuffer("write buffer", p->write_buffers, p->mshrs), // see below
       blkSize(blk_size),
+      wordSize(word_size),
       lookupLatency(p->hit_latency),
       forwardLatency(p->hit_latency),
       fillLatency(p->response_latency),
@@ -195,6 +196,19 @@ BaseCache::regStats()
             hits[access_idx].subname(i, system->getMasterName(i));
         }
     }
+
+    /* weil0ng: initilize util per blk stats. */
+    int numWords = blkSize/wordSize;
+    utilPerBlk
+        .init(numWords+1) // +1 because we need to record from 0 - full utilization.
+        .name(name() + ".utilPerBlk")
+        .desc("Cacheline utilization per blk after brought into cache and before evicted.")
+        .flags(total | pdf)
+        ;
+    for (int i = 0; i < numWords+1; ++i) {
+        utilPerBlk.subname(i, std::to_string(i));
+    }
+
 
 // These macros make it easier to sum the right subset of commands and
 // to change the subset of commands that are considered "demand" vs

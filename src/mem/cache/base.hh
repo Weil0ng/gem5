@@ -258,6 +258,9 @@ class BaseCache : public MemObject
     /** Block size of this cache */
     const unsigned blkSize;
 
+    /** weil0ng: word size of this cache. */
+    const unsigned wordSize;
+
     /**
      * The latency of tag lookup of a cache. It occurs when there is
      * an access to the cache.
@@ -327,6 +330,9 @@ class BaseCache : public MemObject
      * @addtogroup CacheStatistics
      * @{
      */
+
+    /* weil0ng: stats for cacheline utilization. */
+    Stats::Vector utilPerBlk;
 
     /** Number of hits per thread for each type of command.
         @sa Packet::Command */
@@ -458,7 +464,7 @@ class BaseCache : public MemObject
     virtual void regStats();
 
   public:
-    BaseCache(const BaseCacheParams *p, unsigned blk_size);
+    BaseCache(const BaseCacheParams *p, unsigned blk_size, unsigned word_size);
     ~BaseCache() {}
 
     virtual void init();

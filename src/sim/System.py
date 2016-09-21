@@ -77,6 +77,9 @@ class System(MemObject):
 
     cache_line_size = Param.Unsigned(64, "Cache line size in bytes")
 
+    # weil0ng: word size, finest granularity in memory system.
+    word_size = Param.Unsigned(8, "Word size in bytes.")
+
     exit_on_work_items = Param.Bool(False, "Exit from the simulation loop when "
                                     "encountering work item annotations.")
     work_item_id = Param.Int(-1, "specific work item id")
