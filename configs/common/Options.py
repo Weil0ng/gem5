@@ -141,6 +141,8 @@ def addCommonOptions(parser):
     parser.add_option("--l2_assoc", type="int", default=8)
     parser.add_option("--l3_assoc", type="int", default=16)
     parser.add_option("--cacheline_size", type="int", default=64)
+    # weil0ng: word size of the cache.
+    parser.add_option("--word_size", type="int", default=8)
 
     # dist-gem5 options
     parser.add_option("--dist", action="store_true",
@@ -295,6 +297,10 @@ def addSEOptions(parser):
                       help="Redirect stdout to a file.")
     parser.add_option("--errout", default="",
                       help="Redirect stderr to a file.")
+    # weil0ng: add options to specify workloads.
+    parser.add_option("--benchmark", action="store", type="string",
+                      help=("Specify workloads, semi-colon"
+                          "sperated for each cpu."))
 
 def addFSOptions(parser):
     # Simulation options

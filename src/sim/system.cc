@@ -92,6 +92,7 @@ System::System(Params *p)
       physmem(name() + ".physmem", p->memories, p->mmap_using_noreserve),
       memoryMode(p->mem_mode),
       _cacheLineSize(p->cache_line_size),
+      _wordSize(p->word_size),
       workItemsBegin(0),
       workItemsEnd(0),
       numWorkIds(p->num_work_ids),
@@ -111,8 +112,11 @@ System::System(Params *p)
 
     // check if the cache line size is a value known to work
     if (!(_cacheLineSize == 16 || _cacheLineSize == 32 ||
-          _cacheLineSize == 64 || _cacheLineSize == 128))
+          _cacheLineSize == 64 || _cacheLineSize == 128)) {
+        // weil0ng: print current cache line size.
+        warn_once("Cache line size set to %u\n", _cacheLineSize);
         warn_once("Cache line size is neither 16, 32, 64 nor 128 bytes.\n");
+    }
 
     // Get the generic system master IDs
     MasterID tmp_id M5_VAR_USED;

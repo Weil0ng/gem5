@@ -207,6 +207,9 @@ public:
     {
         Addr tag = extractTag(addr);
         int set = extractSet(addr);
+        /* weil0ng: get offset. */
+        int offset = extractOffset(addr);
+
         BlkType *blk = sets[set].findBlk(tag, is_secure);
         lat = accessLatency;;
 
@@ -229,6 +232,8 @@ public:
                 lat = cache->ticksToCycles(blk->whenReady - curTick());
             }
             blk->refCount += 1;
+            /* weil0ng: update touch mask. */
+            blk->touchMask |= (1 << offset);
         }
 
         return blk;
@@ -337,6 +342,16 @@ public:
     virtual int getWayAllocationMax() const override
     {
         return allocAssoc;
+    }
+
+    /** weil0ng:
+     * Generate the offset from the given address.
+     * @param addr The address to get the offset from.
+     * @return The offset of the address.
+     */
+    Addr extractOffset(Addr addr) const override
+    {
+        return ((addr >> offsetShift) & offsetMask);
     }
 
     /**

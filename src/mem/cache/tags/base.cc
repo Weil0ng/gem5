@@ -48,6 +48,7 @@
 
 #include "mem/cache/tags/base.hh"
 
+#include "base/intmath.hh"
 #include "cpu/smt.hh" //maxThreadsPerCPU
 #include "mem/cache/base.hh"
 #include "sim/sim_exit.hh"
@@ -55,10 +56,14 @@
 using namespace std;
 
 BaseTags::BaseTags(const Params *p)
-    : ClockedObject(p), blkSize(p->block_size), size(p->size),
+    : ClockedObject(p), blkSize(p->block_size), wordSize(p->word_size), size(p->size),
       accessLatency(p->hit_latency), cache(nullptr), warmupBound(0),
       warmedUp(false), numBlocks(0)
 {
+    /* weil0ng: set offset related bits here. */
+    numWords = blkSize / wordSize;
+    offsetShift = floorLog2(wordSize);
+    offsetMask = numWords - 1;
 }
 
 void

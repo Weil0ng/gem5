@@ -72,6 +72,8 @@ def config_cache(options, system):
 
     # Set the cache line size of the system
     system.cache_line_size = options.cacheline_size
+    # weil0ng: Set the word size of the system.
+    system.word_size = options.word_size
 
     # If elastic trace generation is enabled, make sure the memory system is
     # minimal so that compute delays do not include memory access latencies.

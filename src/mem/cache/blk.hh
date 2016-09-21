@@ -96,6 +96,8 @@ class CacheBlk
     uint8_t *data;
     /** the number of bytes stored in this block. */
     unsigned size;
+    /* weil0ng: the number of words in this block. */
+    unsigned numWords;
 
     /** block state: OR of CacheBlkStatusBit */
     typedef unsigned State;
@@ -122,6 +124,9 @@ class CacheBlk
     int srcMasterId;
 
     Tick tickInserted;
+
+    /* weil0ng: bit mask for each word, 1 indicates it is touched at least once. */
+    int touchMask;
 
   protected:
     /**
@@ -172,7 +177,7 @@ class CacheBlk
           asid(-1), tag(0), data(0) ,size(0), status(0), whenReady(0),
           set(-1), way(-1), isTouched(false), refCount(0),
           srcMasterId(Request::invldMasterId),
-          tickInserted(0)
+          tickInserted(0), touchMask(0)
     {}
 
     CacheBlk(const CacheBlk&) = delete;
