@@ -209,8 +209,6 @@ public:
         int set = extractSet(addr);
         /* weil0ng: get offset. */
         int offset = extractOffset(addr);
-        int verify_offset = extractBlkOffset(addr);
-        assert(verify_offset/wordSize == offset);
 
         BlkType *blk = sets[set].findBlk(tag, is_secure);
         lat = accessLatency;;

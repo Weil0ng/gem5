@@ -65,7 +65,7 @@
 #include "sim/sim_exit.hh"
 
 Cache::Cache(const CacheParams *p)
-    : BaseCache(p, p->line_size, p->system->wordSize()),
+    : BaseCache(p, p->system->cacheLineSize(), p->system->wordSize()),
       tags(p->tags),
       prefetcher(p->prefetcher),
       doFastWrites(true),
