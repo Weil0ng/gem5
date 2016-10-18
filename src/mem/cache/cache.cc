@@ -65,7 +65,7 @@
 #include "sim/sim_exit.hh"
 
 Cache::Cache(const CacheParams *p)
-    : BaseCache(p, p->system->cacheLineSize(), p->system->wordSize()),
+    : BaseCache(p, p->line_size, p->system->wordSize()),
       tags(p->tags),
       prefetcher(p->prefetcher),
       doFastWrites(true),
@@ -296,6 +296,10 @@ Cache::access(PacketPtr pkt, CacheBlk *&blk, Cycles &lat,
 
     DPRINTF(CacheVerbose, "%s for %s addr %#llx size %d\n", __func__,
             pkt->cmdString(), pkt->getAddr(), pkt->getSize());
+
+    // weil0ng: tmp prints.
+    //printf("%s access: %s %#lx for size %d\n", name().c_str(),
+    //        pkt->cmdString().c_str(), pkt->getAddr(), pkt->getSize());
 
     if (pkt->req->isUncacheable()) {
         DPRINTF(Cache, "%s%s addr %#llx uncacheable\n", pkt->cmdString(),
@@ -593,6 +597,9 @@ bool
 Cache::recvTimingReq(PacketPtr pkt)
 {
     DPRINTF(CacheTags, "%s tags: %s\n", __func__, tags->print());
+
+    // weil0ng: tmp print, this prints a lot of size 1, 4 and 8 for L1, 64 for L2.
+    // printf("%s recvs pkt of size %u\n", name().c_str(), pkt->getSize());
 
     assert(pkt->isRequest());
 

@@ -602,6 +602,18 @@ class DDR4_2400_x64(DRAMCtrl):
     IDD5 = '192mA'
     VDD = '1.2V'
     VDD2 = '2.5V'
+    
+    # weil0ng: something wrong with Micron datasheet, use hynix datasheet (H5AN8G8NMFR-xxC) for power
+    #IDD0 = '36mA'
+    #IDD02 = '5.5mA'
+    #IDD2N = '27mA'
+    #IDD3N = '42mA'
+    #IDD3N2 = '6mA'
+    #IDD4W = '126mA'
+    #IDD4R = '120mA'
+    #IDD5 = '179mA'
+    #VDD = '1.2V'
+    #VDD2 = '2.5V'
 
 # A single LPDDR2-S4 x32 interface (one command/address bus), with
 # default timings based on a LPDDR2-1066 4 Gbit part (Micron MT42L128M32D1)

@@ -34,6 +34,8 @@ SimObject('Cache.py')
 
 Source('base.cc')
 Source('cache.cc')
+# weil0ng: add sector cache to compilation.
+Source('sector_cache.cc')
 Source('blk.cc')
 Source('mshr.cc')
 Source('mshr_queue.cc')
@@ -50,6 +52,6 @@ DebugFlag('HWPrefetch')
 # CacheTags is so outrageously verbose, printing the cache's entire tag
 # array on each timing access, that you should probably have to ask for
 # it explicitly even above and beyond CacheAll.
-CompoundFlag('CacheAll', ['Cache', 'CachePort', 'CacheRepl', 'CacheVerbose',
-                          'HWPrefetch'])
+CompoundFlag('CacheAll', ['Cache', 'CachePort', 'CacheRepl',
+                          'CacheVerbose', 'HWPrefetch'])
 

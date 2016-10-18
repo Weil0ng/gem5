@@ -63,21 +63,28 @@ import MemConfig
 from Caches import *
 from cpu2000 import *
 
-binary_dir = '../SPEC_CPU2006/{0}/build/build_base_i386-m32-gcc42-nn.0000/'
-data_dir = '../SPEC_CPU2006/{0}/data/test/input/'
+workload_dir = '../MEM_WORKLOADS'
+binary_dir = workload_dir + '/{0}/build/build_base_i386-m32-gcc42-nn.0000/'
+data_dir = workload_dir + '/{0}/data/test/input/'
+SSCA_dir = workload_dir + '/{0}/'
+
+name = "SSCA2"
+ssca2 = LiveProcess()
+ssca2.executable = SSCA_dir.format( name ) + 'SSCA2'
+ssca2.cmd = [ssca2.executable] + [16]
+ssca2.output = 'ssca2.out'
 
 name = "401.bzip2"
 bzip2 = LiveProcess()
 bzip2.executable =  binary_dir.format( name ) + 'bzip2'
-data= '../SPEC_CPU2006/401.bzip2/data/ref/input/liberty.jpg'
+data= workload_dir + '/401.bzip2/data/ref/input/liberty.jpg'
 bzip2.cmd = [bzip2.executable] + [data, '30']
 bzip2.output = 'bzip2.ref.liberty.out'
-
 
 name = '429.mcf'
 mcf = LiveProcess()
 mcf.executable =  binary_dir.format( name ) + 'mcf'
-data='../SPEC_CPU2006/429.mcf/data/ref/input/inp.in'
+data=workload_dir + '/429.mcf/data/ref/input/inp.in'
 mcf.cmd = [mcf.executable] + [data]
 mcf.output = 'inp.out'
 
@@ -85,13 +92,13 @@ mcf.output = 'inp.out'
 name = '470.lbm'
 lbm = LiveProcess()
 lbm.executable =  binary_dir.format( name ) + 'lbm'
-lbm.cmd = [lbm.executable]+['3000', 'reference.dat', '0', '0', '../SPEC_CPU2006/470.lbm/data/ref/input/100_100_130_ldc.of']
+lbm.cmd = [lbm.executable]+['3000', 'reference.dat', '0', '0', workload_dir + '470.lbm/data/ref/input/100_100_130_ldc.of']
 lbm.output = 'lbm.out'
 
 name = '433.milc'
 milc=LiveProcess()
 milc.executable = binary_dir.format( name ) +'milc'
-stdin = '../SPEC_CPU2006/433.milc/data/ref/input/su3imp.in'
+stdin = workload_dir + '/433.milc/data/ref/input/su3imp.in'
 milc.cmd = [milc.executable]
 milc.input=stdin
 milc.output='su3imp.out'
@@ -99,7 +106,7 @@ milc.output='su3imp.out'
 name = '437.leslie3d'
 leslie3d = LiveProcess()
 leslie3d.executable = binary_dir.format( name ) + 'leslie3d'
-stdin = '../SPEC_CPU2006/437.leslie3d/data/ref/input/leslie3d.in'
+stdin = workload_dir + '/437.leslie3d/data/ref/input/leslie3d.in'
 leslie3d.cmd = [leslie3d.executable]
 leslie3d.input=stdin
 leslie3d.output='leslie3d.ref.out'
@@ -127,7 +134,7 @@ astar.output = 'rivers.out'
 name = '450.soplex'
 soplex = LiveProcess()
 soplex.executable =  binary_dir.format( name ) +'soplex'
-data = '../SPEC_CPU2006/450.soplex/data/ref/input/pds-50.mps'
+data = workload_dir + '/450.soplex/data/ref/input/pds-50.mps'
 soplex.cmd = [soplex.executable]+['-s1 -e -m45000',data]
 soplex.output = 'soplex.ref.pds-50.mps.out'
 
@@ -140,7 +147,7 @@ zeusmp.output = 'zeusmp.stdout'
 name = '471.omnetpp'
 omnetpp=LiveProcess()
 omnetpp.executable = binary_dir.format( name ) +'omnetpp'
-#data = '../SPEC_CPU2006/471.omnetpp/data/ref/input/omnetpp.ini'
+#data = workload_dir + '/471.omnetpp/data/ref/input/omnetpp.ini'
 omnetpp.cmd = [omnetpp.executable]+['omnetpp.ini']
 omnetpp.output = 'omnetpp.log'
 
@@ -167,14 +174,14 @@ sphinx3.output = 'an4.out'
 name = "483.xalancbmk"
 xalancbmk = LiveProcess()
 xalancbmk.executable = binary_dir.format( name ) + 'Xalan'
-xalancbmk.cmd = [ xalancbmk.executable ] + ['-v ../SPEC_CPU2006/483.xalancbmk/data/ref/input/t5.xml ../SPEC_CPU2006/483.xalancbmk/data/ref/input/xalanc.xsl']
+xalancbmk.cmd = [ xalancbmk.executable ] + ['-v {}/483.xalancbmk/data/ref/input/t5.xml {}/483.xalancbmk/data/ref/input/xalanc.xsl'.format(workload_dir, workload_dir)]
 xalancbmk.output = 'xalancbmk.ref.out'
 
 #hmmer
 name = "456.hmmer"
 hmmer = LiveProcess()
 hmmer.executable = binary_dir.format( name ) + 'hmmer'
-hmmer.cmd = [ hmmer.executable ] + ['../SPEC_CPU2006/456.hmmer/data/ref/input/nph3.hmm','../SPEC_CPU2006/456.hmmer/data/ref/input/swiss41']
+hmmer.cmd = [ hmmer.executable ] + ['{}/456.hmmer/data/ref/input/nph3.hmm','{}/456.hmmer/data/ref/input/swiss41'.format(workload_dir, workload_dir)]
 hmmer.output = 'hmmer.ref.nph3.out'
 
 #libquantum
@@ -241,6 +248,8 @@ def get_processes(options):
     for benchmark in benchmarks:
         if benchmark == 'perlbench':
             process = perlbench
+        elif benchmark == 'ssca2':
+            process = ssca2
         elif benchmark == 'bzip2':
             process = bzip2
         elif benchmark == 'gcc':
@@ -463,4 +472,5 @@ else:
     MemConfig.config_mem(options, system)
 
 root = Root(full_system = False, system = system)
+Simulation.setWorkCountOptions(system, options)
 Simulation.run(options, root, system, FutureClass)

@@ -51,6 +51,8 @@ class BaseCache(MemObject):
     cxx_header = "mem/cache/base.hh"
 
     size = Param.MemorySize("Capacity")
+    # weil0ng: add line size as a per cache config param.
+    line_size = Param.Unsigned("block size")
     assoc = Param.Unsigned("Associativity")
 
     hit_latency = Param.Cycles("Hit latency")
@@ -109,3 +111,9 @@ class Cache(BaseCache):
     # this should be set to True for anything but the last-level
     # cache.
     writeback_clean = Param.Bool(False, "Writeback clean lines")
+
+# weil0ng: Sector cache, manage subblocked cache. Support both FG access
+#          at word granularity and CG access at blk granularity.
+class SectorCache(Cache):
+    type = 'SectorCache'
+    cxx_header = 'mem/cache/sector_cache.hh'

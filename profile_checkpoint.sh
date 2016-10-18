@@ -1,0 +1,1 @@
+time build/X86/gem5.opt configs/example/spec.py -n 1 --cpu-type=detailed --caches --l2cache --mem-type=DDR4_2400_x64 --mem-size=8GB --benchmark=$1 --checkpoint-dir=ckpts/$2 -r 1 --work-end-exit-count=1 -s 10000000

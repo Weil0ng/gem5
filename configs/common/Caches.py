@@ -61,6 +61,15 @@ class L1_ICache(L1Cache):
 class L1_DCache(L1Cache):
     pass
 
+# weil0ng: L2 sector cache.
+class L2SectorCache(SectorCache):
+    assoc = 8
+    hit_latency = 20
+    response_latency = 20
+    mshrs = 20
+    tgts_per_mshr = 12
+    write_buffers = 8
+
 class L2Cache(Cache):
     assoc = 8
     hit_latency = 20

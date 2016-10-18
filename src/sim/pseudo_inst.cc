@@ -605,6 +605,10 @@ workbegin(ThreadContext *tc, uint64_t workid, uint64_t threadid)
         uint64_t systemWorkBeginCount = sys->incWorkItemsBegin();
         int cpuId = tc->getCpuPtr()->cpuId();
 
+        // weil0ng: print work item count.
+        DPRINTF(WorkItems, "Work Begin Count: %d, params->work_begin_ckpt_count: %d\n",
+                systemWorkBeginCount, params->work_begin_ckpt_count);
+
         if (params->work_cpus_ckpt_count != 0 &&
             sys->markWorkItem(cpuId) >= params->work_cpus_ckpt_count) {
             //

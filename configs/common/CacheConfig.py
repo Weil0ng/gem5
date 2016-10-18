@@ -64,8 +64,9 @@ def config_cache(options, system):
             O3_ARM_v7a_DCache, O3_ARM_v7a_ICache, O3_ARM_v7aL2, \
             O3_ARM_v7aWalkCache
     else:
-        dcache_class, icache_class, l2_cache_class, walk_cache_class = \
-            L1_DCache, L1_ICache, L2Cache, None
+        # weil0ng: add l2_sector_cache_class.
+        dcache_class, icache_class, l2_cache_class, l2_sector_cache_class, walk_cache_class = \
+            L1_DCache, L1_ICache, L2Cache, L2SectorCache, None
 
         if buildEnv['TARGET_ISA'] == 'x86':
             walk_cache_class = PageTableWalkerCache
@@ -86,9 +87,21 @@ def config_cache(options, system):
         # Provide a clock for the L2 and the L1-to-L2 bus here as they
         # are not connected using addTwoLevelCacheHierarchy. Use the
         # same clock as the CPUs.
-        system.l2 = l2_cache_class(clk_domain=system.cpu_clk_domain,
-                                   size=options.l2_size,
-                                   assoc=options.l2_assoc)
+
+        # weil0ng: use sector cache as L2.
+        if options.l2sector:
+            print "Using Sector Cache as L2."
+            system.l2 = l2_cache_class(clk_domain=system.cpu_clk_domain,
+                    size=options.l2_size,
+                    assoc=options.l2_assoc,
+                    # weil0ng: pass line size to l2 cache config.
+                    line_size=options.l2_line_size)
+        else:
+            system.l2 = l2_cache_class(clk_domain=system.cpu_clk_domain,
+                    size=options.l2_size,
+                    assoc=options.l2_assoc,
+                    # weil0ng: pass line size to l2 cache config.
+                    line_size=options.l2_line_size)
 
         system.tol2bus = L2XBar(clk_domain = system.cpu_clk_domain)
         system.l2.cpu_side = system.tol2bus.master
@@ -100,15 +113,19 @@ def config_cache(options, system):
     for i in xrange(options.num_cpus):
         if options.caches:
             icache = icache_class(size=options.l1i_size,
-                                  assoc=options.l1i_assoc)
+                                  assoc=options.l1i_assoc,
+                                  # weil0ng: pass line size to l1i cache config.
+                                  line_size=options.l1i_line_size)
             dcache = dcache_class(size=options.l1d_size,
-                                  assoc=options.l1d_assoc)
+                                  assoc=options.l1d_assoc,
+                                  # weil0ng: pass line size to l1d cache config.
+                                  line_size=options.l1d_line_size)
 
             # If we have a walker cache specified, instantiate two
             # instances here
             if walk_cache_class:
-                iwalkcache = walk_cache_class()
-                dwalkcache = walk_cache_class()
+                iwalkcache = walk_cache_class(line_size = options.cacheline_size)
+                dwalkcache = walk_cache_class(line_size = options.cacheline_size)
             else:
                 iwalkcache = None
                 dwalkcache = None
