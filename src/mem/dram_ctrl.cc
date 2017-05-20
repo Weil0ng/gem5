@@ -333,6 +333,12 @@ DRAMCtrl::decodeAddr(PacketPtr pkt, Addr dramPktAddr, unsigned size,
     // weil0ng:
     uint8_t device;
 
+    // weil0ng: let's get the device offset first.
+    // This is essentially bytes into the 64B transaction batch,
+    // we are assuming each 8B is consecutive on one device,
+    // or each 8B comes from 8 devices?
+    device = (dramPktAddr % burstSize) / 8;
+
     // truncate the address to a DRAM burst, which makes it unique to
     // a specific column, row, bank, rank and channel
     Addr addr = dramPktAddr / burstSize;
@@ -340,12 +346,6 @@ DRAMCtrl::decodeAddr(PacketPtr pkt, Addr dramPktAddr, unsigned size,
     // we have removed the lowest order address bits that denote the
     // position within the column
     if (addrMapping == Enums::RoRaBaChCo) {
-        // weil0ng: let's get the device offset first.
-        // This is essentially bytes into the 64B transaction batch,
-        // we are assuming each 8B is consecutive on one device,
-        // or each 8B comes from 8 devices?
-        device = (addr % columnsPerRowBuffer) / devicesPerRank;
-
         // the lowest order bits denote the column to ensure that
         // sequential cache lines occupy the same row
         addr = addr / columnsPerRowBuffer;
@@ -366,9 +366,6 @@ DRAMCtrl::decodeAddr(PacketPtr pkt, Addr dramPktAddr, unsigned size,
         // lastly, get the row bits, no need to remove them from addr
         row = addr % rowsPerBank;
     } else if (addrMapping == Enums::RoRaBaCoCh) {
-        // weil0ng: let's get the device offset first.
-        device = (addr % columnsPerStripe) / devicesPerRank;
-
         // take out the lower-order column bits
         addr = addr / columnsPerStripe;
 
@@ -393,8 +390,6 @@ DRAMCtrl::decodeAddr(PacketPtr pkt, Addr dramPktAddr, unsigned size,
     } else if (addrMapping == Enums::RoCoRaBaCh) {
         // optimise for closed page mode and utilise maximum
         // parallelism of the DRAM (at the cost of power) 
-        // weil0ng: let's get the device offset first.
-        device = (addr % columnsPerStripe) / devicesPerRank;
 
         // take out the lower-order column bits
         addr = addr / columnsPerStripe;
@@ -426,8 +421,8 @@ DRAMCtrl::decodeAddr(PacketPtr pkt, Addr dramPktAddr, unsigned size,
     assert(row < rowsPerBank);
     assert(row < Bank::NO_ROW);
 
-    DPRINTF(DRAM, "Address: %#08x Rank %d Bank %d Row %d Device %d\n",
-            dramPktAddr, rank, bank, row, device);
+    DPRINTF(DRAM, "Address: %#08x Burst %d Rank %d Bank %d Row %d Device %d\n",
+            dramPktAddr, burstSize, rank, bank, row, device);
 
     // create the corresponding DRAM packet with the entry time and
     // ready time set to the current tick, the latter will be updated
@@ -621,7 +616,7 @@ bool
 DRAMCtrl::recvTimingReq(PacketPtr pkt)
 {
     // This is where we enter from the outside world
-    DPRINTF(DRAM, "recvTimingReq: request %s addr %lld size %d\n",
+    DPRINTF(DRAM, "recvTimingReq: request %s addr %#08x size %d\n",
             pkt->cmdString(), pkt->getAddr(), pkt->getSize());
 
     panic_if(pkt->cacheResponding(), "Should not see packets where cache "
