@@ -425,9 +425,7 @@ def run_acc(options, root, testsys, cpu_class):
     np = options.num_cpus
     if options.use_graph_accelerator:
         switch_cpus = [cpu_class(switched_out=True, cpu_id=(i))
-                for i in xrange(np)]
-        
-
+                for i in xrange(np)] 
 
 def run(options, root, testsys, cpu_class):
     if options.checkpoint_dir:

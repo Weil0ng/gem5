@@ -59,7 +59,8 @@ using namespace Data;
 
 DRAMCtrl::DRAMCtrl(const DRAMCtrlParams* p) :
     AbstractMemory(p),
-    port(name() + ".port", *this), isVMCMode(false), isTimingMode(false), // initilize VMC mode to false
+    port(name() + ".port", *this), isVMCMode(false), // Init VMC mode here
+    isTimingMode(false),
     retryRdReq(false), retryWrReq(false),
     busState(READ),
     busStateNext(READ),
@@ -391,8 +392,7 @@ DRAMCtrl::decodeAddr(PacketPtr pkt, Addr dramPktAddr, unsigned size,
         row = addr % rowsPerBank;
     } else if (addrMapping == Enums::RoCoRaBaCh) {
         // optimise for closed page mode and utilise maximum
-        // parallelism of the DRAM (at the cost of power)
-        
+        // parallelism of the DRAM (at the cost of power) 
         // weil0ng: let's get the device offset first.
         device = (addr % columnsPerStripe) / devicesPerRank;
 
@@ -433,8 +433,9 @@ DRAMCtrl::decodeAddr(PacketPtr pkt, Addr dramPktAddr, unsigned size,
     // ready time set to the current tick, the latter will be updated
     // later
     uint16_t bank_id = banksPerRank * rank + bank;
-    return new DRAMPacket(pkt, isRead, rank, bank, row, device, bank_id, dramPktAddr,
-                          size, ranks[rank]->banks[bank], *ranks[rank]);
+    return new DRAMPacket(pkt, isRead, rank, bank, row,
+            device, bank_id, dramPktAddr, size,
+            ranks[rank]->banks[bank], *ranks[rank]);
 }
 
 void

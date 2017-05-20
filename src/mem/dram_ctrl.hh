@@ -675,10 +675,12 @@ class DRAMCtrl : public AbstractMemory
         Rank& rankRef;
 
         DRAMPacket(PacketPtr _pkt, bool is_read, uint8_t _rank, uint8_t _bank,
-                   uint32_t _row, uint8_t _device, uint16_t bank_id, Addr _addr,
-                   unsigned int _size, Bank& bank_ref, Rank& rank_ref)
+                   uint32_t _row, uint8_t _device, uint16_t bank_id,
+                   Addr _addr, unsigned int _size, Bank& bank_ref,
+                   Rank& rank_ref)
             : entryTime(curTick()), readyTime(curTick()),
-              pkt(_pkt), isRead(is_read), rank(_rank), bank(_bank), row(_row), device(_device),
+              pkt(_pkt), isRead(is_read), rank(_rank), bank(_bank),
+              row(_row), device(_device),
               bankId(bank_id), addr(_addr), size(_size), burstHelper(NULL),
               bankRef(bank_ref), rankRef(rank_ref)
         { }

@@ -303,7 +303,8 @@ def addAccOptions(parser):
     parser.add_option("--acc-skip", action="store", type="int", default=None,
                       help="Skip first N instructions.")
     parser.add_option("--acc-length", action="store", type="int", default=None,
-                      help="Use accelerator for the next N instruction after skip.")
+                      help="Use accelerator for the next N
+                      instruction after skip.")
 
 def addSEOptions(parser):
     # Benchmark options

@@ -171,7 +171,7 @@ if options.use_graph_accelerator:
             options.cpu_type == 'AtomicSimpleCPU'), (
                     'Graph accelerator can only be used '
                     'with TimingSimpleCPU or AtomicSimpleCPU'
-            )
+                    )
 
 (CPUClass, test_mem_mode, FutureClass) = Simulation.setCPUClass(options)
 CPUClass.numThreads = numThreads
