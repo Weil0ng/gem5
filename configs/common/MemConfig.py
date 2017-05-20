@@ -86,6 +86,10 @@ def mem_names():
     """Return a list of valid memory names."""
     return _mem_classes.keys()
 
+def mem_policy_names():
+    """ weil0ng: return a list of valid page policy names."""
+    return ["open", "open_adaptive", "close", "close_adaptive"]
+
 # Add all memory controllers in the object hierarchy.
 for name, cls in inspect.getmembers(m5.objects, is_mem_class):
     _mem_classes[name] = cls
@@ -160,6 +164,9 @@ def config_mem(options, system):
     else:
         subsystem = system
         xbar = system.membus
+
+    # weil0ng: set the memory page policy.
+    system.page_policy = options.page_policy
 
     if options.tlm_memory:
         system.external_memory = m5.objects.ExternalSlave(

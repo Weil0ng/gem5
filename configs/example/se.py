@@ -124,6 +124,7 @@ def get_processes(options):
 parser = optparse.OptionParser()
 Options.addCommonOptions(parser)
 Options.addSEOptions(parser)
+Options.addAccOptions(parser)
 
 if '--ruby' in sys.argv:
     Ruby.define_options(parser)
@@ -165,6 +166,12 @@ else:
     print >> sys.stderr, "No workload specified. Exiting!\n"
     sys.exit(1)
 
+if options.use_graph_accelerator:
+    assert (options.cpu_type == 'TimingSimpleCPU' or 
+            options.cpu_type == 'AtomicSimpleCPU'), (
+                    'Graph accelerator can only be used '
+                    'with TimingSimpleCPU or AtomicSimpleCPU'
+            )
 
 (CPUClass, test_mem_mode, FutureClass) = Simulation.setCPUClass(options)
 CPUClass.numThreads = numThreads

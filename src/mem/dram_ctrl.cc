@@ -59,7 +59,7 @@ using namespace Data;
 
 DRAMCtrl::DRAMCtrl(const DRAMCtrlParams* p) :
     AbstractMemory(p),
-    port(name() + ".port", *this), isTimingMode(false),
+    port(name() + ".port", *this), isVMCMode(false), isTimingMode(false), // initilize VMC mode to false
     retryRdReq(false), retryWrReq(false),
     busState(READ),
     busStateNext(READ),
@@ -254,6 +254,9 @@ DRAMCtrl::startup()
     // remember the memory system mode of operation
     isTimingMode = system()->isTimingMode();
 
+    // weil0ng: set the pageMgmt
+    pageMgmt = system()->getPagePolicy();
+
     if (isTimingMode) {
         // timestamp offset should be in clock cycles for DRAMPower
         timeStampOffset = divCeil(curTick(), tCK);
@@ -270,6 +273,9 @@ DRAMCtrl::startup()
         // start of simulation
         busBusyUntil = curTick() + tRP + tRCD + tCL;
     }
+
+    DPRINTF(DRAM, "Startup params: timing %s, page policy %s\n",
+            isTimingMode ? "True" : "False", pageMgmt);
 }
 
 Tick
@@ -323,6 +329,8 @@ DRAMCtrl::decodeAddr(PacketPtr pkt, Addr dramPktAddr, unsigned size,
     // use a 64-bit unsigned during the computations as the row is
     // always the top bits, and check before creating the DRAMPacket
     uint64_t row;
+    // weil0ng:
+    uint8_t device;
 
     // truncate the address to a DRAM burst, which makes it unique to
     // a specific column, row, bank, rank and channel
@@ -331,6 +339,12 @@ DRAMCtrl::decodeAddr(PacketPtr pkt, Addr dramPktAddr, unsigned size,
     // we have removed the lowest order address bits that denote the
     // position within the column
     if (addrMapping == Enums::RoRaBaChCo) {
+        // weil0ng: let's get the device offset first.
+        // This is essentially bytes into the 64B transaction batch,
+        // we are assuming each 8B is consecutive on one device,
+        // or each 8B comes from 8 devices?
+        device = (addr % columnsPerRowBuffer) / devicesPerRank;
+
         // the lowest order bits denote the column to ensure that
         // sequential cache lines occupy the same row
         addr = addr / columnsPerRowBuffer;
@@ -351,6 +365,9 @@ DRAMCtrl::decodeAddr(PacketPtr pkt, Addr dramPktAddr, unsigned size,
         // lastly, get the row bits, no need to remove them from addr
         row = addr % rowsPerBank;
     } else if (addrMapping == Enums::RoRaBaCoCh) {
+        // weil0ng: let's get the device offset first.
+        device = (addr % columnsPerStripe) / devicesPerRank;
+
         // take out the lower-order column bits
         addr = addr / columnsPerStripe;
 
@@ -375,6 +392,9 @@ DRAMCtrl::decodeAddr(PacketPtr pkt, Addr dramPktAddr, unsigned size,
     } else if (addrMapping == Enums::RoCoRaBaCh) {
         // optimise for closed page mode and utilise maximum
         // parallelism of the DRAM (at the cost of power)
+        
+        // weil0ng: let's get the device offset first.
+        device = (addr % columnsPerStripe) / devicesPerRank;
 
         // take out the lower-order column bits
         addr = addr / columnsPerStripe;
@@ -406,14 +426,14 @@ DRAMCtrl::decodeAddr(PacketPtr pkt, Addr dramPktAddr, unsigned size,
     assert(row < rowsPerBank);
     assert(row < Bank::NO_ROW);
 
-    DPRINTF(DRAM, "Address: %lld Rank %d Bank %d Row %d\n",
-            dramPktAddr, rank, bank, row);
+    DPRINTF(DRAM, "Address: %#08x Rank %d Bank %d Row %d Device %d\n",
+            dramPktAddr, rank, bank, row, device);
 
     // create the corresponding DRAM packet with the entry time and
     // ready time set to the current tick, the latter will be updated
     // later
     uint16_t bank_id = banksPerRank * rank + bank;
-    return new DRAMPacket(pkt, isRead, rank, bank, row, bank_id, dramPktAddr,
+    return new DRAMPacket(pkt, isRead, rank, bank, row, device, bank_id, dramPktAddr,
                           size, ranks[rank]->banks[bank], *ranks[rank]);
 }
 

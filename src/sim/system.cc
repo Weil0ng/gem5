@@ -101,6 +101,7 @@ System::System(Params *p)
 #endif
       physmem(name() + ".physmem", p->memories, p->mmap_using_noreserve),
       memoryMode(p->mem_mode),
+      pageMgmt(p->page_policy),
       _cacheLineSize(p->cache_line_size),
       workItemsBegin(0),
       workItemsEnd(0),

@@ -157,6 +157,12 @@ class System : public MemObject
     }
 
     /**
+     * weil0ng:
+     * get the page management policy.
+     */
+    Enums::PageManage getPagePolicy() const { return pageMgmt; }
+
+    /**
      * Should caches be bypassed?
      *
      * Some CPUs need to bypass caches to allow direct memory
@@ -307,6 +313,9 @@ class System : public MemObject
     PhysicalMemory physmem;
 
     Enums::MemoryMode memoryMode;
+
+    // weil0ng: add page policy argument.
+    Enums::PageManage pageMgmt;
 
     const unsigned int _cacheLineSize;
 

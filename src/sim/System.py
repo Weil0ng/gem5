@@ -39,6 +39,12 @@ from SimpleMemory import *
 class MemoryMode(Enum): vals = ['invalid', 'atomic', 'timing',
                                 'atomic_noncaching']
 
+# Define this here instead of in DRAMCtrl.py
+# Enum for the page policy, either open, open_adaptive, close, or
+# close_adaptive.
+class PageManage(Enum): vals = ['open', 'open_adaptive', 'close',
+                                        'close_adaptive']
+
 class System(MemObject):
     type = 'System'
     cxx_header = "sim/system.hh"
@@ -68,6 +74,10 @@ class System(MemObject):
     # such that these can be passed from the I/O subsystem through an
     # I/O bridge or cache
     mem_ranges = VectorParam.AddrRange([], "Ranges that constitute main memory")
+
+    # weil0ng: populate dram page policy when creating the system
+    page_policy = Param.PageManage('open_adaptive',
+                                   "Page policy to use in DRAM management.")
 
     cache_line_size = Param.Unsigned(64, "Cache line size in bytes")
 

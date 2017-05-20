@@ -88,6 +88,10 @@ def addNoISAOptions(parser):
                       default="512MB",
                       help="Specify the physical memory size (single memory)")
 
+    # weil0ng: add cmd knob for page policy.
+    parser.add_option("--page-policy", type="choice", default="open_adaptive",
+                      choices=MemConfig.mem_policy_names(),
+                      help="type of memory page policies")
 
     parser.add_option("--memchecker", action="store_true")
 
@@ -292,6 +296,14 @@ def addCommonOptions(parser):
                       choices=["arm", "thumb", "aarch64"],
                       help="ARM instruction set.")
 
+def addAccOptions(parser):
+    # Accelerator options
+    parser.add_option("--use-graph-accelerator", action="store_true",
+                      help="Use graph accelerator.")
+    parser.add_option("--acc-skip", action="store", type="int", default=None,
+                      help="Skip first N instructions.")
+    parser.add_option("--acc-length", action="store", type="int", default=None,
+                      help="Use accelerator for the next N instruction after skip.")
 
 def addSEOptions(parser):
     # Benchmark options

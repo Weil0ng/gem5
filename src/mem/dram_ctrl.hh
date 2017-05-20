@@ -128,6 +128,11 @@ class DRAMCtrl : public AbstractMemory
      */
     MemoryPort port;
 
+    /* weil0ng:
+     * Mark if we are operating in VMC (virtual-multi-channel) mode.
+     */
+    bool isVMCMode;
+
     /**
      * Remeber if the memory system is in timing mode
      */
@@ -637,6 +642,8 @@ class DRAMCtrl : public AbstractMemory
         const uint8_t rank;
         const uint8_t bank;
         const uint32_t row;
+        /** weil0ng: also record the device id */
+        const uint8_t device;
 
         /**
          * Bank id is calculated considering banks in all the ranks
@@ -668,10 +675,10 @@ class DRAMCtrl : public AbstractMemory
         Rank& rankRef;
 
         DRAMPacket(PacketPtr _pkt, bool is_read, uint8_t _rank, uint8_t _bank,
-                   uint32_t _row, uint16_t bank_id, Addr _addr,
+                   uint32_t _row, uint8_t _device, uint16_t bank_id, Addr _addr,
                    unsigned int _size, Bank& bank_ref, Rank& rank_ref)
             : entryTime(curTick()), readyTime(curTick()),
-              pkt(_pkt), isRead(is_read), rank(_rank), bank(_bank), row(_row),
+              pkt(_pkt), isRead(is_read), rank(_rank), bank(_bank), row(_row), device(_device),
               bankId(bank_id), addr(_addr), size(_size), burstHelper(NULL),
               bankRef(bank_ref), rankRef(rank_ref)
         { }
@@ -746,6 +753,12 @@ class DRAMCtrl : public AbstractMemory
      * @param pkt The DRAM packet created from the outside world pkt
      */
     void doDRAMAccess(DRAMPacket* dram_pkt);
+
+    /** 
+     * weil0ng:
+     * Switch the DRAM ctrl mode. Inline.
+     */
+    void switchVMCMode(bool on) {isVMCMode = on;};
 
     /**
      * When a packet reaches its "readyTime" in the response Q,

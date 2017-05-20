@@ -421,6 +421,14 @@ def repeatSwitch(testsys, repeat_switch_cpu_list, maxtick, switch_freq):
             exit_event = m5.simulate(maxtick - m5.curTick())
             return exit_event
 
+def run_acc(options, root, testsys, cpu_class):
+    np = options.num_cpus
+    if options.use_graph_accelerator:
+        switch_cpus = [cpu_class(switched_out=True, cpu_id=(i))
+                for i in xrange(np)]
+        
+
+
 def run(options, root, testsys, cpu_class):
     if options.checkpoint_dir:
         cptdir = options.checkpoint_dir
