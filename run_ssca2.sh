@@ -1,0 +1,1 @@
+./build/X86/gem5.opt configs/example/se.py --cpu-type=AtomicSimpleCPU --mem-type=DDR4_2400_8x8 --page-policy=open_adaptive --use-graph-accelerator -s 1 --fast-forward 400000057 --warmup-insts 100000000 --maxinsts 100000004 -c ~/SSCA2v2.2/SSCA2 -o 12

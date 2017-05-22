@@ -299,11 +299,11 @@ def addCommonOptions(parser):
 def addAccOptions(parser):
     # Accelerator options
     parser.add_option("--use-graph-accelerator", action="store_true",
-            help="Use graph accelerator.")
+                      help="Use graph accelerator.")
     parser.add_option("--acc-skip", action="store", type="int", default=None,
-            help="Skip first N instructions.")
+                      help="Skip first N instructions.")
     parser.add_option("--acc-length", action="store", type="int", default=None,
-            help="Use accelerator for the next N instruction after skip.")
+                      help="Use accelerator for the next N instruction after skip.")
 
 def addSEOptions(parser):
     # Benchmark options
@@ -320,6 +320,12 @@ def addSEOptions(parser):
                       help="Redirect stdout to a file.")
     parser.add_option("--errout", default="",
                       help="Redirect stderr to a file.")
+    parser.add_option("--benchmark", action="store",
+                      type="string",
+                      dest="benchmark",
+                      help="Specify the benchmark to run. Available benchmarks: %s"\
+                      % DefinedBenchmarks)
+
 
 def addFSOptions(parser):
     from FSConfig import os_types

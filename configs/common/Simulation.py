@@ -438,7 +438,7 @@ def run(options, root, testsys, cpu_class):
     if options.fast_forward and options.checkpoint_restore != None:
         fatal("Can't specify both --fast-forward and --checkpoint-restore")
 
-    if options.standard_switch and not options.caches:
+    if options.standard_switch and not options.caches and not options.use_graph_accelerator:
         fatal("Must specify --caches when using --standard-switch")
 
     if options.standard_switch and options.repeat_switch:
@@ -521,8 +521,11 @@ def run(options, root, testsys, cpu_class):
     if options.standard_switch:
         switch_cpus = [TimingSimpleCPU(switched_out=True, cpu_id=(i))
                        for i in xrange(np)]
-        switch_cpus_1 = [DerivO3CPU(switched_out=True, cpu_id=(i))
+        switch_cpus_1 = ([DerivO3CPU(switched_out=True, cpu_id=(i))
                         for i in xrange(np)]
+                        # weil0ng: only TimingSimpleCPU can bypass cache entirely
+                        if not options.use_graph_accelerator
+                        else [TimingSimpleCPU(switched_out=True, cpu_id=(i)) for i in xrange(np)])
 
         for i in xrange(np):
             switch_cpus[i].system =  testsys

@@ -70,6 +70,7 @@ DRAMCtrl::DRAMCtrl(const DRAMCtrlParams* p) :
     deviceRowBufferSize(p->device_rowbuffer_size),
     devicesPerRank(p->devices_per_rank),
     burstSize((devicesPerRank * burstLength * deviceBusWidth) / 8),
+    devBurstSize((burstLength * deviceBusWidth)/8),
     rowBufferSize(devicesPerRank * deviceRowBufferSize),
     columnsPerRowBuffer(rowBufferSize / burstSize),
     columnsPerStripe(range.interleaved() ? range.granularity() / burstSize : 1),
@@ -330,14 +331,14 @@ DRAMCtrl::decodeAddr(PacketPtr pkt, Addr dramPktAddr, unsigned size,
     // use a 64-bit unsigned during the computations as the row is
     // always the top bits, and check before creating the DRAMPacket
     uint64_t row;
-    // weil0ng:
+    // weil0ng: the device this req points to.
     uint8_t device;
 
     // weil0ng: let's get the device offset first.
     // This is essentially bytes into the 64B transaction batch,
     // we are assuming each 8B is consecutive on one device,
     // or each 8B comes from 8 devices?
-    device = (dramPktAddr % burstSize) / 8;
+    device = (dramPktAddr % burstSize) / devicesPerRank;
 
     // truncate the address to a DRAM burst, which makes it unique to
     // a specific column, row, bank, rank and channel
@@ -421,8 +422,12 @@ DRAMCtrl::decodeAddr(PacketPtr pkt, Addr dramPktAddr, unsigned size,
     assert(row < rowsPerBank);
     assert(row < Bank::NO_ROW);
 
-    DPRINTF(DRAM, "Address: %#08x Burst %d Rank %d Bank %d Row %d Device %d\n",
-            dramPktAddr, burstSize, rank, bank, row, device);
+    // weil0ng: giving unique id to each device within a channel.
+    device = device + rank * devicesPerRank;
+
+    DPRINTF(DRAM, "Address: %#08x ReqSize: %d Burst %d "\
+            "Rank %d Bank %d Row %d Device %d\n",
+            dramPktAddr, size, burstSize, rank, bank, row, device);
 
     // create the corresponding DRAM packet with the entry time and
     // ready time set to the current tick, the latter will be updated
@@ -2430,6 +2435,17 @@ DRAMCtrl::regStats()
         .name(name() + ".avgWrQLen")
         .desc("Average write queue length when enqueuing")
         .precision(2);
+
+    // weil0ng: init stats for short reqs per dev.
+    avgDevRdQLen
+        .init(devicesPerRank * ranksPerChannel)
+        .name(name() + ".avgDevRdQLen")
+        .desc("Average read queue length for each device when enqueuing")
+
+    avgDevWtQLen
+        .init(devicesPerRank * ranksPerChannel)
+        .name(name() + ".avgDevWtQLen")
+        .desc("Average write queue length for each device when enqueuing")
 
     totQLat
         .name(name() + ".totQLat")

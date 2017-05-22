@@ -642,7 +642,12 @@ class DRAMCtrl : public AbstractMemory
         const uint8_t rank;
         const uint8_t bank;
         const uint32_t row;
-        /** weil0ng: also record the device id */
+        /** weil0ng: also record the device id 
+         * This is only accurate when we split dram
+         * pkts to short dram pkts, i.e. the size
+         * of the dram pkt is smaller or equal to
+         * the device burst length.
+         */
         const uint8_t device;
 
         /**
@@ -874,6 +879,13 @@ class DRAMCtrl : public AbstractMemory
     std::deque<DRAMPacket*> writeQueue;
 
     /**
+     * weil0ng:
+     * Map from device id to short request queues.
+     */
+    std::map<uint8_t, std::deque<DRAMPacket*>> devRdQ;
+    std::map<uint8_t, std::deque<DRAMPacket*>> devWtQ;
+
+    /**
      * To avoid iterating over the write queue to check for
      * overlapping transactions, maintain a set of burst addresses
      * that are currently queued. Since we merge writes to the same
@@ -909,6 +921,8 @@ class DRAMCtrl : public AbstractMemory
     const uint32_t deviceRowBufferSize;
     const uint32_t devicesPerRank;
     const uint32_t burstSize;
+    // weil0ng: keep the burst size for each dev.
+    const uint32_t devBurstSize;
     const uint32_t rowBufferSize;
     const uint32_t columnsPerRowBuffer;
     const uint32_t columnsPerStripe;
@@ -1043,6 +1057,10 @@ class DRAMCtrl : public AbstractMemory
     // Average queue lengths
     Stats::Average avgRdQLen;
     Stats::Average avgWrQLen;
+
+    // weil0ng: stats for short reqs per dev.
+    Stats::Vector avgDevRdQLen;
+    Stats::Vector avgDevWtQLen;
 
     // Row hit count and rate
     Stats::Scalar readRowHits;

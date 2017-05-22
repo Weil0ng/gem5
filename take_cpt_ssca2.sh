@@ -1,0 +1,1 @@
+./build/X86/gem5.opt configs/example/se.py --cpu-type=AtomicSimpleCPU --mem-type=DDR4_2400_8x8 --page-policy=open_adaptive --use-graph-accelerator --at-instruction --take-checkpoints 400000057 --bench ssca_12 -c ~/SSCA2v2.2/SSCA2 -o 12

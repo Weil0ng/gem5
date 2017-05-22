@@ -138,8 +138,8 @@ if args:
 multiprocesses = []
 numThreads = 1
 
-if options.bench:
-    apps = options.bench.split("-")
+if options.benchmark:
+    apps = options.benchmark.split("-")
     if len(apps) != options.num_cpus:
         print "number of benchmarks not equal to set num_cpus!"
         sys.exit(1)
