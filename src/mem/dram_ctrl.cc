@@ -52,6 +52,7 @@
 #include "debug/DRAMPower.hh"
 #include "debug/DRAMState.hh"
 #include "debug/Drain.hh"
+#include "debug/VMC.hh"
 #include "sim/system.hh"
 
 using namespace std;
@@ -59,7 +60,7 @@ using namespace Data;
 
 DRAMCtrl::DRAMCtrl(const DRAMCtrlParams* p) :
     AbstractMemory(p),
-    port(name() + ".port", *this), isVMCMode(false), // Init VMC mode here
+    port(name() + ".port", *this),
     isTimingMode(false),
     retryRdReq(false), retryWrReq(false),
     busState(READ),
@@ -624,6 +625,9 @@ DRAMCtrl::recvTimingReq(PacketPtr pkt)
     DPRINTF(DRAM, "recvTimingReq: request %s addr %#08x size %d\n",
             pkt->cmdString(), pkt->getAddr(), pkt->getSize());
 
+    // weil0ng: print VMC mode status
+    DPRINTF(VMC, "VMC mode: %s\n", system()->isVMCMode());
+
     panic_if(pkt->cacheResponding(), "Should not see packets where cache "
              "is responding");
 
@@ -636,6 +640,7 @@ DRAMCtrl::recvTimingReq(PacketPtr pkt)
     }
     prevArrival = curTick();
 
+    // weil0ng: @TODO when in VMC mode...
 
     // Find out how many dram packets a pkt translates to
     // If the burst size is equal or larger than the pkt size, then a pkt
@@ -2440,12 +2445,12 @@ DRAMCtrl::regStats()
     avgDevRdQLen
         .init(devicesPerRank * ranksPerChannel)
         .name(name() + ".avgDevRdQLen")
-        .desc("Average read queue length for each device when enqueuing")
+        .desc("Average read queue length for each device when enqueuing");
 
     avgDevWtQLen
         .init(devicesPerRank * ranksPerChannel)
         .name(name() + ".avgDevWtQLen")
-        .desc("Average write queue length for each device when enqueuing")
+        .desc("Average write queue length for each device when enqueuing");
 
     totQLat
         .name(name() + ".totQLat")

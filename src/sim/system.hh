@@ -107,6 +107,9 @@ class System : public MemObject
 
     SystemPort _systemPort;
 
+    // weil0ng: keep track of VMC switch
+    bool VMCMode;
+
   public:
 
     /**
@@ -157,6 +160,11 @@ class System : public MemObject
     }
 
     /**
+     * weil0ng: note that this is NOT const
+     */
+    bool isVMCMode() { return VMCMode; }
+
+    /**
      * weil0ng:
      * get the page management policy.
      */
@@ -174,6 +182,14 @@ class System : public MemObject
     /** @} */
 
     /** @{ */
+
+    /**
+     * weil0ng:
+     * \warn This should only be used by the Python world.
+     * Switch the DRAM ctrl between normal and VMC mode.
+     */
+    void switchVMCMode(bool on) {VMCMode = on;};
+
     /**
      * Get the memory mode of the system.
      *

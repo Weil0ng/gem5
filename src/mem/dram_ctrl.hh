@@ -128,11 +128,6 @@ class DRAMCtrl : public AbstractMemory
      */
     MemoryPort port;
 
-    /* weil0ng:
-     * Mark if we are operating in VMC (virtual-multi-channel) mode.
-     */
-    bool isVMCMode;
-
     /**
      * Remeber if the memory system is in timing mode
      */
@@ -761,12 +756,6 @@ class DRAMCtrl : public AbstractMemory
      */
     void doDRAMAccess(DRAMPacket* dram_pkt);
 
-    /** 
-     * weil0ng:
-     * Switch the DRAM ctrl mode. Inline.
-     */
-    void switchVMCMode(bool on) {isVMCMode = on;};
-
     /**
      * When a packet reaches its "readyTime" in the response Q,
      * use the "access()" method in AbstractMemory to actually
@@ -1136,8 +1125,11 @@ class DRAMCtrl : public AbstractMemory
 
     Tick recvAtomic(PacketPtr pkt);
     void recvFunctional(PacketPtr pkt);
+    // weil0ng: the below function is moved to dispatchPkt. It should
+    // directly forward the pkt to dispatch if not in VMC mode.
+    // Otherwise, the pkt should first go through an on-chip buffer.
     bool recvTimingReq(PacketPtr pkt);
-
+    bool dispatchPkt(PacketPtr pkt);
 };
 
 #endif //__MEM_DRAM_CTRL_HH__

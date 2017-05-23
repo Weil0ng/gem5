@@ -96,6 +96,8 @@ CompoundFlag('XBar', ['BaseXBar', 'CoherentXBar', 'NoncoherentXBar',
 DebugFlag('Bridge')
 DebugFlag('CommMonitor')
 DebugFlag('DRAM')
+# weil0ng: add new debug flag
+DebugFlag('VMC')
 DebugFlag('DRAMPower')
 DebugFlag('DRAMState')
 DebugFlag('ExternalPort')

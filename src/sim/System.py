@@ -53,6 +53,8 @@ class System(MemObject):
     cxx_exports = [
         PyBindMethod("getMemoryMode"),
         PyBindMethod("setMemoryMode"),
+        # weil0ng: export VMC switch
+        PyBindMethod("switchVMCMode")
     ]
 
     memories = VectorParam.AbstractMemory(Self.all,

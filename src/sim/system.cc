@@ -85,6 +85,7 @@ int System::numSystemsRunning = 0;
 
 System::System(Params *p)
     : MemObject(p), _systemPort("system_port", this),
+      VMCMode(false), // weil0ng: init VMC mode to false
       _numContexts(0),
       multiThread(p->multi_thread),
       pagePtr(0),
