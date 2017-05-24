@@ -78,6 +78,10 @@ class DRAMCtrl(AbstractMemory):
     write_buffer_size = Param.Unsigned(64, "Number of write queue entries")
     read_buffer_size = Param.Unsigned(32, "Number of read queue entries")
 
+    # weil0ng: vmc buffer sizes.
+    vmc_write_buffer_size = Param.Unsigned(8, "Number of vmc wtq entries")
+    vmc_read_buffer_size = Param.Unsigned(4, "Number of vmc rdq entries")
+
     # threshold in percent for when to forcefully trigger writes and
     # start emptying the write buffer
     write_high_thresh_perc = Param.Percent(85, "Threshold to force writes")

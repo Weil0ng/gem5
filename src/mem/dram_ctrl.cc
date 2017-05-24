@@ -63,6 +63,7 @@ DRAMCtrl::DRAMCtrl(const DRAMCtrlParams* p) :
     port(name() + ".port", *this),
     isTimingMode(false),
     retryRdReq(false), retryWrReq(false),
+    vmcRetryRdReq(false), vmcRetryWrReq(false), // weil0ng: init vmc retry flags here
     busState(READ),
     busStateNext(READ),
     nextReqEvent(this), respondEvent(this),
@@ -80,6 +81,8 @@ DRAMCtrl::DRAMCtrl(const DRAMCtrlParams* p) :
     bankGroupArch(p->bank_groups_per_rank > 0),
     banksPerRank(p->banks_per_rank), channels(p->channels), rowsPerBank(0),
     readBufferSize(p->read_buffer_size),
+    vmcReadBufferSize(p->vmc_read_buffer_size), // weil0ng: init vmc buffers here
+    vmcWriteBufferSize(p->vmc_write_buffer_size),
     writeBufferSize(p->write_buffer_size),
     writeHighThreshold(writeBufferSize * p->write_high_thresh_perc / 100.0),
     writeLowThreshold(writeBufferSize * p->write_low_thresh_perc / 100.0),
@@ -260,6 +263,14 @@ DRAMCtrl::startup()
     // weil0ng: set the pageMgmt
     pageMgmt = system()->getPagePolicy();
 
+    // weil0ng: set up vmc queues
+    for (unsigned i=0; i<ranksPerChannel * devicesPerRank; i++) {
+        devRdQ[i] = std::deque<DRAMPacket*>();
+        devWrQ[i] = std::deque<DRAMPacket*>();
+        isInDevWrQ[i] = std::unordered_set<Addr>();
+        devRespQ[i] = std::deque<DRAMPacket*>();
+    }
+
     if (isTimingMode) {
         // timestamp offset should be in clock cycles for DRAMPower
         timeStampOffset = divCeil(curTick(), tCK);
@@ -434,7 +445,8 @@ DRAMCtrl::decodeAddr(PacketPtr pkt, Addr dramPktAddr, unsigned size,
     // ready time set to the current tick, the latter will be updated
     // later
     uint16_t bank_id = banksPerRank * rank + bank;
-    return new DRAMPacket(pkt, isRead, rank, bank, row,
+    // weil0ng: actual dram packets are never virtual.
+    return new DRAMPacket(pkt, isRead, false, rank, bank, row,
             device, bank_id, dramPktAddr, size,
             ranks[rank]->banks[bank], *ranks[rank]);
 }
@@ -602,6 +614,153 @@ DRAMCtrl::addToWriteQueue(PacketPtr pkt, unsigned int pktCount)
     }
 }
 
+bool
+DRAMCtrl::devReadQueueFull(uint8_t device, unsigned pkt_count) {
+    DPRINTF(VMC, "DevRdQ limit %d, current status:\n", vmcReadBufferSize);
+    string header_str("");
+    string stat_str("");
+    for (auto i=0; i<devicesPerRank * ranksPerChannel; ++i) {
+        header_str += std::to_string(i);
+        stat_str += std::to_string(devRdQ[i].size() + devRespQ[i].size());
+        header_str += string("\t");
+        stat_str += string("\t");
+    }
+    DPRINTF(VMC, "%s\n", header_str.c_str());
+    DPRINTF(VMC, "%s\n", stat_str.c_str());
+
+    for (auto i=0; i<pkt_count; ++i) {
+        if (devRdQ[device].size() + devRespQ[device].size() + 1 > vmcReadBufferSize)
+            return true;
+    }
+    return false;
+}
+
+bool
+DRAMCtrl::devWriteQueueFull(uint8_t device, unsigned pkt_count) {
+    DPRINTF(VMC, "DevWrQ limit %d, current status:\n", vmcWriteBufferSize);
+    string header_str("");
+    string stat_str("");
+    for (auto i=0; i<devicesPerRank * ranksPerChannel; ++i) {
+        header_str += std::to_string(i);
+        stat_str += std::to_string(devWrQ[i].size());
+        header_str += string("\t");
+        stat_str += string("\t");
+    }
+    DPRINTF(VMC, "%s\n", header_str.c_str());
+    DPRINTF(VMC, "%s\n", stat_str.c_str());
+
+    for (auto i=0; i<pkt_count; ++i) {
+        if (devWrQ[device].size() + 1 > vmcWriteBufferSize)
+            return true;
+    }
+    return false;
+}
+
+void 
+DRAMCtrl::addToDevReadQueue(PacketPtr pkt, uint8_t device, unsigned short_pkt_count) {
+    assert(pkt->isRead());
+
+    Addr addr = pkt->getAddr();
+    uint8_t rank = device / devicesPerRank;
+    uint8_t rank_offset = rank * devicesPerRank;
+    
+    unsigned pktsServicedByDevWrQ = 0;
+    BurstHelper* burst_helper = NULL;
+    for (unsigned cnt=0; cnt<short_pkt_count; ++cnt) {
+        unsigned size = std::min((addr | (devBurstSize - 1)) + 1,
+                                pkt->getAddr() + pkt->getSize()) - addr;
+        DPRINTF(VMC, "Short pkt of size %d at device %d\n", size, device);
+        bool foundInDevWrQ = false;
+        Addr dev_burst_addr = devBurstAlign(addr);
+        if (isInDevWrQ[device].find(dev_burst_addr) != isInDevWrQ[device].end()) {
+            for (const auto& p : devWrQ[device]) {
+                if (p->addr <= addr && (addr + size) <= (p->addr + p->size)) {
+                    foundInDevWrQ = true;
+                    ++pktsServicedByDevWrQ;
+                    DPRINTF(VMC, "Short pkt to addr %#08x with size %d serviced by wrq\n",
+                            addr, size);
+                    break;
+                }
+            }
+        }
+
+        // If not found in device write queue...
+        if (!foundInDevWrQ) {
+            if (short_pkt_count > 1 && burst_helper == NULL) {
+                DPRINTF(VMC, "Req of size %d turned into %d short pkts\n", size, short_pkt_count);
+                burst_helper = new BurstHelper(short_pkt_count);
+            }
+        }
+        DRAMPacket* dram_pkt = decodeAddr(pkt, addr, size, true);
+        dram_pkt->burstHelper = burst_helper;
+        
+        assert(devRdQ[device].size() + devRespQ[device].size() < vmcReadBufferSize);
+        DPRINTF(VMC, "Adding to dev read queue %d\n", device);
+        devRdQ[device].push_back(dram_pkt);
+        ++dram_pkt->rankRef.readEntries;
+
+        addr = (addr | (devBurstSize - 1)) + 1;
+        device = (((device - rank_offset) + 1) % devicesPerRank) + rank_offset;
+    }
+    // TODO: 1) if all pkts are serviced by wrq, accessAndRespond? 2) update how many split pkts are serviced 3) schedule
+    if (pktsServicedByDevWrQ == short_pkt_count) {
+        accessAndRespond(pkt, frontendLatency); // weil0ng: TODO is this correct?
+        return;
+    }
+
+    if (burst_helper != NULL)
+        burst_helper->burstsServiced = pktsServicedByDevWrQ;
+
+    // weil0ng: this might not be correct, we probabaly need to dispatch instead of
+    // processing next req.
+    if (!nextReqEvent.scheduled()) {
+        DPRINTF(VMC, "Schedule next req immediately\n");
+        schedule(nextReqEvent, curTick());
+    }
+}
+
+void
+DRAMCtrl::addToDevWriteQueue(PacketPtr pkt, uint8_t device, unsigned short_pkt_count) {
+    assert(pkt->isWrite());
+
+    Addr addr = pkt->getAddr();
+    uint8_t rank = device / devicesPerRank;
+    uint8_t rank_offset = rank * devicesPerRank;
+    for (unsigned cnt=0; cnt<short_pkt_count; ++cnt) {
+        unsigned size = std::min((addr | (devBurstSize - 1)) + 1,
+                                pkt->getAddr() + pkt->getSize()) - addr;
+        DPRINTF(VMC, "Short pkt of size %d at device %d\n", size, device);
+
+        bool merged = isInDevWrQ[device].find(devBurstAlign(addr)) != isInDevWrQ[device].end();
+
+        if (!merged) {
+            DRAMPacket* dram_pkt = decodeAddr(pkt, addr, size, false);
+            assert(devWrQ[device].size() < vmcWriteBufferSize);
+
+            DPRINTF(VMC, "Adding to dev write queue %d", device);
+
+            devWrQ[device].push_back(dram_pkt);
+            isInDevWrQ[device].insert(devBurstAlign(addr));
+            assert(devWrQ[device].size() == isInDevWrQ[device].size());
+
+            ++dram_pkt->rankRef.writeEntries;
+        } else {
+            DPRINTF(VMC, "Merging short write pkt with existing at device %d", device);
+        }
+        addr = (addr | (devBurstSize - 1)) + 1;
+        device = (((device - rank_offset) + 1) % devicesPerRank) + rank_offset;
+    }
+    // TODO: 1) accessAndRespond 2) schedule
+    accessAndRespond(pkt, frontendLatency); // weil0ng: is this correct?
+
+    // weil0ng: this might not be correct, we probabaly need to dispatch instead of
+    // processing next req.
+    if (!nextReqEvent.scheduled()) {
+        DPRINTF(VMC, "Schedule next req immediately\n");
+        schedule(nextReqEvent, curTick());
+    }
+}
+
 void
 DRAMCtrl::printQs() const {
     DPRINTF(DRAM, "===READ QUEUE===\n\n");
@@ -618,15 +777,16 @@ DRAMCtrl::printQs() const {
     }
 }
 
+// weil0ng: this serves as the on-chip buffer for VMC.
 bool
 DRAMCtrl::recvTimingReq(PacketPtr pkt)
 {
     // This is where we enter from the outside world
     DPRINTF(DRAM, "recvTimingReq: request %s addr %#08x size %d\n",
             pkt->cmdString(), pkt->getAddr(), pkt->getSize());
-
-    // weil0ng: print VMC mode status
-    DPRINTF(VMC, "VMC mode: %s\n", system()->isVMCMode());
+    DPRINTF(VMC, "=============%s==========\n", curTick());
+    DPRINTF(VMC, "recvTimingReq: request %s addr %#08x size %d vmc %s\n",
+            pkt->cmdString(), pkt->getAddr(), pkt->getSize(), system()->isVMCMode());
 
     panic_if(pkt->cacheResponding(), "Should not see packets where cache "
              "is responding");
@@ -634,13 +794,56 @@ DRAMCtrl::recvTimingReq(PacketPtr pkt)
     panic_if(!(pkt->isRead() || pkt->isWrite()),
              "Should only see read and writes at memory controller\n");
 
+    // If we are not in VMC mode, direct this pkt to mem_ctrl dispatch.
+    if (!system()->isVMCMode())
+        return dispatchPkt(pkt);
+    
+    /** Otherwise, we are in VMC mode. */
+    Addr addr = pkt->getAddr();
+    unsigned size = pkt->getSize();
+    assert(size > 0);
+    // Get the offset into the first device.
+    unsigned offset = pkt->getAddr() & (devBurstSize - 1);
+    unsigned short_pkt_count = divCeil(offset + size, devBurstSize);
+    DRAMPacket* tmp_pkt = decodeAddr(pkt, addr, size, pkt->isRead());
+    uint8_t device = tmp_pkt->device;
+    if (pkt->isRead()) {
+        if (devReadQueueFull(device, short_pkt_count)) {
+            DPRINTF(VMC, "Device read queue full, not accepting\n");
+            retryRdReq = true;
+            numRdRetry++;
+            return false; // TODO: gem5 will hang before we implement popping from dev Qs.
+        } else {
+            addToDevReadQueue(pkt, device, short_pkt_count);
+            readReqs++;
+            bytesReadSys += size;
+        }
+    } else {
+        assert(pkt->isWrite());
+        if (devWriteQueueFull(device, short_pkt_count)) {
+            DPRINTF(VMC, "Device write queue full, not accepting\n");
+            retryWrReq = true;
+            numWrRetry++;
+        } else {
+            addToDevWriteQueue(pkt, device, short_pkt_count);
+            writeReqs++;
+            bytesWrittenSys += size;
+        }
+    }
+    
+    // TODO: remove once done, this makes compiler happy before finishing this function
+    return dispatchPkt(pkt);
+}
+
+
+bool
+DRAMCtrl::dispatchPkt(PacketPtr pkt)
+{
     // Calc avg gap between requests
     if (prevArrival != 0) {
         totGap += curTick() - prevArrival;
     }
     prevArrival = curTick();
-
-    // weil0ng: @TODO when in VMC mode...
 
     // Find out how many dram packets a pkt translates to
     // If the burst size is equal or larger than the pkt size, then a pkt
@@ -648,35 +851,54 @@ DRAMCtrl::recvTimingReq(PacketPtr pkt)
     // multiple dram packets
     unsigned size = pkt->getSize();
     unsigned offset = pkt->getAddr() & (burstSize - 1);
-    unsigned int dram_pkt_count = divCeil(offset + size, burstSize);
+    unsigned dram_pkt_count = divCeil(offset + size, burstSize);
 
     // check local buffers and do not accept if full
     if (pkt->isRead()) {
         assert(size != 0);
         if (readQueueFull(dram_pkt_count)) {
-            DPRINTF(DRAM, "Read queue full, not accepting\n");
             // remember that we have to retry this port
-            retryRdReq = true;
-            numRdRetry++;
+            // weil0ng: only remember this when not in VMC mode.
+            // When in VMC mode, the front-end buffer sets retry signal.
+            if (!system()->isVMCMode()) {
+                DPRINTF(DRAM, "Read queue full, not accepting\n");
+                retryRdReq = true;
+                numRdRetry++;
+            } else {
+                DPRINTF(VMC, "Read queue full in VMC mode, rejecting consolidated read\n");
+                vmcRetryRdReq = true;
+            }
             return false;
         } else {
             addToReadQueue(pkt, dram_pkt_count);
-            readReqs++;
-            bytesReadSys += size;
+            // weil0ng: only update stats out of VMC mode, otherwise, it should already been
+            // updated.
+            if (!system()->isVMCMode()) {
+                readReqs++;
+                bytesReadSys += size;
+            }
         }
     } else {
         assert(pkt->isWrite());
         assert(size != 0);
         if (writeQueueFull(dram_pkt_count)) {
-            DPRINTF(DRAM, "Write queue full, not accepting\n");
-            // remember that we have to retry this port
-            retryWrReq = true;
-            numWrRetry++;
+            // weil0ng: same as read
+            if (!system()->isVMCMode()) {
+                DPRINTF(DRAM, "Write queue full, not accepting\n");
+                // remember that we have to retry this port
+                retryWrReq = true;
+                numWrRetry++;
+            } else {
+                DPRINTF(VMC, "Write queue full in VMC mode, rejecting consolidated write\n");
+                vmcRetryWrReq = true;
+            }
             return false;
         } else {
             addToWriteQueue(pkt, dram_pkt_count);
-            writeReqs++;
-            bytesWrittenSys += size;
+            if (!system()->isVMCMode()) {
+                writeReqs++;
+                bytesWrittenSys += size;
+            }
         }
     }
 
@@ -2447,9 +2669,9 @@ DRAMCtrl::regStats()
         .name(name() + ".avgDevRdQLen")
         .desc("Average read queue length for each device when enqueuing");
 
-    avgDevWtQLen
+    avgDevWrQLen
         .init(devicesPerRank * ranksPerChannel)
-        .name(name() + ".avgDevWtQLen")
+        .name(name() + ".avgDevWrQLen")
         .desc("Average write queue length for each device when enqueuing");
 
     totQLat

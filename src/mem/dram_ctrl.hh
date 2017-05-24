@@ -140,6 +140,13 @@ class DRAMCtrl : public AbstractMemory
     bool retryWrReq;
 
     /**
+     * weil0ng:
+     * in VMC mode, remember to retry a consolidated request.
+     */
+    bool vmcRetryRdReq;
+    bool vmcRetryWrReq;
+
+    /**
      * Bus state used to control the read/write switching and drive
      * the scheduling of the next request.
      */
@@ -615,6 +622,26 @@ class DRAMCtrl : public AbstractMemory
     };
 
     /**
+     * weil0ng:
+     * A VMCHelper helps remember which short DRAMPackets 
+     * an consolidated DRAMPacket has.
+     */
+    // Forward decl.
+    class DRAMPacket;
+
+    class VMCHelper {
+
+        public:
+
+          const unsigned int short_pkt_cnt;
+          std::deque<DRAMPacket*> short_pkts;
+
+          VMCHelper(unsigned int _short_pkt_cnt)
+              : short_pkt_cnt(_short_pkt_cnt)
+          { }
+    };
+
+    /**
      * A DRAM packet stores packets along with the timestamp of when
      * the packet entered the queue, and also the decoded address.
      */
@@ -632,6 +659,9 @@ class DRAMCtrl : public AbstractMemory
         const PacketPtr pkt;
 
         const bool isRead;
+
+        // weil0ng
+        const bool isVirtual;
 
         /** Will be populated by address decoder */
         const uint8_t rank;
@@ -674,15 +704,20 @@ class DRAMCtrl : public AbstractMemory
         Bank& bankRef;
         Rank& rankRef;
 
-        DRAMPacket(PacketPtr _pkt, bool is_read, uint8_t _rank, uint8_t _bank,
+        /** weil0ng: a pointer to VMCHelper if this DRAMPacket is a
+         * consolidated DRAMPacket, otherwise, this is NULL.
+         */
+        VMCHelper* vmcHelper;
+
+        DRAMPacket(PacketPtr _pkt, bool is_read, bool is_virtual, uint8_t _rank, uint8_t _bank,
                    uint32_t _row, uint8_t _device, uint16_t bank_id,
                    Addr _addr, unsigned int _size, Bank& bank_ref,
                    Rank& rank_ref)
             : entryTime(curTick()), readyTime(curTick()),
-              pkt(_pkt), isRead(is_read), rank(_rank), bank(_bank),
+              pkt(_pkt), isRead(is_read), isVirtual(is_virtual), rank(_rank), bank(_bank),
               row(_row), device(_device),
               bankId(bank_id), addr(_addr), size(_size), burstHelper(NULL),
-              bankRef(bank_ref), rankRef(rank_ref)
+              bankRef(bank_ref), rankRef(rank_ref), vmcHelper(NULL)
         { }
 
     };
@@ -708,12 +743,28 @@ class DRAMCtrl : public AbstractMemory
     bool readQueueFull(unsigned int pktCount) const;
 
     /**
+     * weil0ng: check if short read queue has room for all the 
+     * short pkts for a outside-world request. Accept them all
+     * at a time or reject them all.
+     *
+     * @param dev The starting device of all the short pkts
+     * @param cnt The number of short pkts
+     * @return true if any of the dev read queue is full
+     */
+    bool devReadQueueFull(uint8_t dev, unsigned int cnt);
+
+    /**
      * Check if the write queue has room for more entries
      *
      * @param pktCount The number of entries needed in the write queue
      * @return true if write queue is full, false otherwise
      */
     bool writeQueueFull(unsigned int pktCount) const;
+
+    /**
+     * weil0ng: same as read above.
+     */
+    bool devWriteQueueFull(uint8_t dev, unsigned int cnt);
 
     /**
      * When a new read comes in, first check if the write q has a
@@ -731,6 +782,9 @@ class DRAMCtrl : public AbstractMemory
      */
     void addToReadQueue(PacketPtr pkt, unsigned int pktCount);
 
+    // weil0ng:
+    void addToDevReadQueue(PacketPtr pkt, uint8_t device, unsigned shortPktCount);
+
     /**
      * Decode the incoming pkt, create a dram_pkt and push to the
      * back of the write queue. \If the write q length is more than
@@ -743,6 +797,9 @@ class DRAMCtrl : public AbstractMemory
      * then pktCount is greater than one.
      */
     void addToWriteQueue(PacketPtr pkt, unsigned int pktCount);
+
+    // weil0ng:
+    void addToDevWriteQueue(PacketPtr pkt, uint8_t device, unsigned shortPktCount);
 
     /**
      * Actually do the DRAM access - figure out the latency it
@@ -862,6 +919,11 @@ class DRAMCtrl : public AbstractMemory
     Addr burstAlign(Addr addr) const { return (addr & ~(Addr(burstSize - 1))); }
 
     /**
+     * weil0ng: serves same pupose as above for dev
+     */
+    Addr devBurstAlign(Addr addr) const { return (addr & ~(Addr(devBurstSize - 1))); }
+
+    /**
      * The controller's main read and write queues
      */
     std::deque<DRAMPacket*> readQueue;
@@ -872,7 +934,7 @@ class DRAMCtrl : public AbstractMemory
      * Map from device id to short request queues.
      */
     std::map<uint8_t, std::deque<DRAMPacket*>> devRdQ;
-    std::map<uint8_t, std::deque<DRAMPacket*>> devWtQ;
+    std::map<uint8_t, std::deque<DRAMPacket*>> devWrQ;
 
     /**
      * To avoid iterating over the write queue to check for
@@ -884,6 +946,11 @@ class DRAMCtrl : public AbstractMemory
     std::unordered_set<Addr> isInWriteQueue;
 
     /**
+     * weil0ng: same purpose as above for short pkts.
+     */
+    std::map<uint8_t, std::unordered_set<Addr>> isInDevWrQ;
+
+    /**
      * Response queue where read packets wait after we're done working
      * with them, but it's not time to send the response yet. The
      * responses are stored seperately mostly to keep the code clean
@@ -892,6 +959,11 @@ class DRAMCtrl : public AbstractMemory
      * be added together.
      */
     std::deque<DRAMPacket*> respQueue;
+
+    /**
+     * weil0ng: resp queue for each device.
+     */
+    std::map<uint8_t, std::deque<DRAMPacket*>> devRespQ;
 
     /**
      * Vector of ranks
@@ -922,6 +994,9 @@ class DRAMCtrl : public AbstractMemory
     const uint32_t channels;
     uint32_t rowsPerBank;
     const uint32_t readBufferSize;
+    // weil0ng: size for VMC buffer
+    const uint32_t vmcReadBufferSize;
+    const uint32_t vmcWriteBufferSize;
     const uint32_t writeBufferSize;
     const uint32_t writeHighThreshold;
     const uint32_t writeLowThreshold;
@@ -1049,7 +1124,7 @@ class DRAMCtrl : public AbstractMemory
 
     // weil0ng: stats for short reqs per dev.
     Stats::Vector avgDevRdQLen;
-    Stats::Vector avgDevWtQLen;
+    Stats::Vector avgDevWrQLen;
 
     // Row hit count and rate
     Stats::Scalar readRowHits;
@@ -1127,9 +1202,12 @@ class DRAMCtrl : public AbstractMemory
     void recvFunctional(PacketPtr pkt);
     // weil0ng: the below function is moved to dispatchPkt. It should
     // directly forward the pkt to dispatch if not in VMC mode.
-    // Otherwise, the pkt should first go through an on-chip buffer.
+    // Otherwise, the pkt should first go through a front-end buffer.
     bool recvTimingReq(PacketPtr pkt);
     bool dispatchPkt(PacketPtr pkt);
+    // weil0ng: try packing short pkts to generate a virtual dram pkt
+    // and dispatch to the mem_ctrl.
+    void tryPackAndDispatch();
 };
 
 #endif //__MEM_DRAM_CTRL_HH__
