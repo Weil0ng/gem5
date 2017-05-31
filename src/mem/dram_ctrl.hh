@@ -140,13 +140,6 @@ class DRAMCtrl : public AbstractMemory
     bool retryWrReq;
 
     /**
-     * weil0ng:
-     * in VMC mode, remember to retry a consolidated request.
-     */
-    bool vmcRetryRdReq;
-    bool vmcRetryWrReq;
-
-    /**
      * Bus state used to control the read/write switching and drive
      * the scheduling of the next request.
      */
@@ -633,12 +626,24 @@ class DRAMCtrl : public AbstractMemory
 
         public:
 
-          const unsigned int short_pkt_cnt;
-          std::deque<DRAMPacket*> short_pkts;
+          const size_t pkt_cnt;
+          std::deque<DRAMPacket*>* pkts;
 
-          VMCHelper(unsigned int _short_pkt_cnt)
-              : short_pkt_cnt(_short_pkt_cnt)
+          VMCHelper(size_t _pkt_cnt, std::deque<DRAMPacket*>* _pkts)
+              : pkt_cnt(_pkt_cnt), pkts(_pkts)
           { }
+
+          DRAMPacket* operator[](int i) {
+              assert(i>=0 && i<pkt_cnt);
+              return (*pkts)[i];
+          }
+
+          ~VMCHelper() {
+              assert(pkts);
+              for (auto p : *pkts)
+                  delete p;
+              delete pkts;
+          }
     };
 
     /**
@@ -661,7 +666,8 @@ class DRAMCtrl : public AbstractMemory
         const bool isRead;
 
         // weil0ng
-        const bool isVirtual;
+        const bool isVirtual; // Is this a virutal pkt?
+        const bool carryAddr; // Does this virtual pkt carry addr?
 
         /** Will be populated by address decoder */
         const uint8_t rank;
@@ -709,18 +715,41 @@ class DRAMCtrl : public AbstractMemory
          */
         VMCHelper* vmcHelper;
 
-        DRAMPacket(PacketPtr _pkt, bool is_read, bool is_virtual, uint8_t _rank, uint8_t _bank,
+        /** weil0ng: pointer to the virtual address pkt that
+         * precedes this one.
+         */
+        DRAMPacket* preReq;
+
+        /** weil0ng: pointer to the virtual pkt that
+         * follows this one.
+         */
+        DRAMPacket* follower;
+
+        DRAMPacket(PacketPtr _pkt, bool is_read, bool is_virtual, 
+                   bool carry_addr, uint8_t _rank, uint8_t _bank,
                    uint32_t _row, uint8_t _device, uint16_t bank_id,
                    Addr _addr, unsigned int _size, Bank& bank_ref,
                    Rank& rank_ref)
             : entryTime(curTick()), readyTime(curTick()),
-              pkt(_pkt), isRead(is_read), isVirtual(is_virtual), rank(_rank), bank(_bank),
+              pkt(_pkt), isRead(is_read),
+              isVirtual(is_virtual), carryAddr(carry_addr),
+              rank(_rank), bank(_bank),
               row(_row), device(_device),
-              bankId(bank_id), addr(_addr), size(_size), burstHelper(NULL),
-              bankRef(bank_ref), rankRef(rank_ref), vmcHelper(NULL)
+              bankId(bank_id), addr(_addr), size(_size),
+              burstHelper(NULL), bankRef(bank_ref),
+              rankRef(rank_ref), vmcHelper(NULL),
+              preReq(NULL)
         { }
 
     };
+
+    // weil0ng: each rank can only hold one set of pending
+    // addrVirtPkt and virtPkt.
+    std::map<uint8_t, DRAMPacket*> pendingAddrVirtPkt;
+    std::map<uint8_t, DRAMPacket*> pendingVirtPkt;
+    // weil0ng: one address register per rank.
+    std::map<uint8_t, DRAMPacket*> readyVirtPkt;
+    bool virtAddrNeeded;
 
     /**
      * Bunch of things requires to setup "events" in gem5
@@ -801,6 +830,10 @@ class DRAMCtrl : public AbstractMemory
     // weil0ng:
     void addToDevWriteQueue(PacketPtr pkt, uint8_t device, unsigned shortPktCount);
 
+    // weil0ng: two utility debug print functions.
+    void printDevReadQueueStatus();
+    void printDevWriteQueueStatus();
+
     /**
      * Actually do the DRAM access - figure out the latency it
      * will take to service the req based on bank state, channel state etc
@@ -813,6 +846,17 @@ class DRAMCtrl : public AbstractMemory
      */
     void doDRAMAccess(DRAMPacket* dram_pkt);
 
+    /** weil0ng:
+     * Performs actual acess to DRAM banks (either short or long).
+     * DO NOT update busBusyUntil and nextReqTime in place.
+     * Those two should always be only updated by doDRAMAccess
+     * so that we can use this function to performance
+     * concurrent multiple accesses.
+     *
+     * Returns busBusyUntil after the acess.
+     */
+    Tick doBankAccess(DRAMPacket* dram_pkt, Tick busBusyUntil);
+
     /**
      * When a packet reaches its "readyTime" in the response Q,
      * use the "access()" method in AbstractMemory to actually
@@ -823,6 +867,14 @@ class DRAMCtrl : public AbstractMemory
      * @param static_latency Static latency to add before sending the packet
      */
     void accessAndRespond(PacketPtr pkt, Tick static_latency);
+
+    /**
+     * weil0ng: similar as above but for virtual pkts.
+     *
+     * Each virtual pkt has one or more short pkts, refer to
+     * VMCHelper. We need to traverse them here.
+     */
+    void accessAndRespondVirtual(DRAMPacket* pkt, Tick static_latency);
 
     /**
      * Address decoder to figure out physical mapping onto ranks,
@@ -840,6 +892,16 @@ class DRAMCtrl : public AbstractMemory
                            bool isRead);
 
     /**
+     * weil0ng: generate a virtual addressing pkt.
+     */
+    DRAMPacket* decodeVirtualAddr(uint8_t rank);
+
+    /**
+     * weil0ng: pack pkts into a virtual pkt.
+     */
+    DRAMPacket* packShortPkts(std::deque<DRAMPacket*> pkts);
+
+    /**
      * The memory schduler/arbiter - picks which request needs to
      * go next, based on the specified policy such as FCFS or FR-FCFS
      * and moves it to the head of the queue.
@@ -851,6 +913,9 @@ class DRAMCtrl : public AbstractMemory
      * @return true if a packet is scheduled to a rank which is available else
      * false
      */
+    // weil0ng: add an argument virtAddrNeeded. When it is set
+    // we find the corresponding virtAddrPkt instead no matther
+    // what policy the scheduler uses. Defaults to false.
     bool chooseNext(std::deque<DRAMPacket*>& queue, Tick extra_col_delay);
 
     /**
@@ -1205,6 +1270,9 @@ class DRAMCtrl : public AbstractMemory
     // Otherwise, the pkt should first go through a front-end buffer.
     bool recvTimingReq(PacketPtr pkt);
     bool dispatchPkt(PacketPtr pkt);
+    // weil0ng: similar to dispatch pkt, but deals with virtual pkts
+    // w/o a valid PacketPtr.
+    bool dispatchVirtualPkt(DRAMPacket* addrPkt, DRAMPacket* pkt);
     // weil0ng: try packing short pkts to generate a virtual dram pkt
     // and dispatch to the mem_ctrl.
     void tryPackAndDispatch();
