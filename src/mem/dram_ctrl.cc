@@ -920,7 +920,7 @@ DRAMCtrl::recvTimingReq(PacketPtr pkt)
             DPRINTF(VMC, "Device read queue full, not accepting\n");
             retryRdReq = true;
             numRdRetry++;
-            return false; // TODO: gem5 will hang before we implement popping from dev Qs.
+            return false;
         } else {
             addToDevReadQueue(pkt, device, short_pkt_count);
             readReqs++;
@@ -1134,11 +1134,22 @@ DRAMCtrl::processRespondEvent()
 
     // weil0ng: if this is a virtual pkt response.
     if (dram_pkt->vmcHelper) {
-        DPRINTF(VMC, "Virtual %s response encountered\n",
-                dram_pkt->isRead?"read":"write");
+        DPRINTF(VMC, "Virtual %s response encountered, has %d pkts\n",
+                dram_pkt->isRead?"read":"write", dram_pkt->vmcHelper->pkt_cnt);
         for (int i=0; i<dram_pkt->vmcHelper->pkt_cnt; ++i) {
             DRAMPacket* cur_pkt = (*(dram_pkt->vmcHelper))[i];
-            accessAndRespond(cur_pkt->pkt, frontendLatency + backendLatency);
+            if (cur_pkt->burstHelper) {
+                DPRINTF(VMC, "Virtual burstHelper has %d/%d serviced\n",
+                        cur_pkt->burstHelper->burstsServiced, cur_pkt->burstHelper->burstCount);
+                cur_pkt->burstHelper->burstsServiced++;
+                if (cur_pkt->burstHelper->burstsServiced == cur_pkt->burstHelper->burstCount) {
+                    accessAndRespond(cur_pkt->pkt, frontendLatency + backendLatency);
+                    delete cur_pkt->burstHelper;
+                    cur_pkt->burstHelper=NULL;
+                }
+            } else {
+                accessAndRespond(cur_pkt->pkt, frontendLatency + backendLatency);
+            }
         }
         // weil0ng: clear the rank register.
         DPRINTF(VMC, "Clearing addr register for rank %d\n", dram_pkt->rank);
@@ -1198,6 +1209,8 @@ DRAMCtrl::chooseNext(std::deque<DRAMPacket*>& queue,
     // FCFS, this method does nothing
     assert(!queue.empty());
 
+    DPRINTF(VMC, "ChooseNext from %s queue\n", (*(queue.begin()))->isRead?"read":"write");
+
     // bool to indicate if a packet to an available rank is found
     bool found_packet = false;
     if (virtAddrNeeded) {
@@ -1220,7 +1233,8 @@ DRAMCtrl::chooseNext(std::deque<DRAMPacket*>& queue,
         return found_packet;
     }
 
-    if (queue.size() == 1) {
+    // weil0ng: keep the request in order in VMC mode.
+    if (queue.size() == 1 || system()->isVMCMode()) {
         DRAMPacket* dram_pkt = queue.front();
         // available rank corresponds to state refresh idle
         if (ranks[dram_pkt->rank]->isAvailable()) {
@@ -1349,7 +1363,7 @@ DRAMCtrl::reorderQueue(std::deque<DRAMPacket*>& queue, Tick extra_col_delay)
 void
 DRAMCtrl::accessAndRespond(PacketPtr pkt, Tick static_latency)
 {
-    DPRINTF(DRAM, "Responding to Address %#08x..\n",pkt->getAddr());
+    DPRINTF(VMC, "Responding to Address %#08x..\n",pkt->getAddr());
 
     bool needsResponse = pkt->needsResponse();
     // do the actual memory access which also turns the packet into a
@@ -1942,10 +1956,10 @@ DRAMCtrl::processNextReqEvent()
 
             // weil0ng: we check for virtual pkt if its' addresses are in the register.
             if (dram_pkt->isVirtual) {
-                DPRINTF(VMC, "Virtual read pkt encountered\n");
+                DPRINTF(VMC, "Virtual read to rank %d encountered\n", dram_pkt->rank);
                 // Since this is a read, it cannot be addrVirtPkt.
                 assert(!dram_pkt->carryAddr);
-                if (!readyVirtPkt[dram_pkt->rank]) {
+                if (!readyVirtPkt[dram_pkt->rank] || readyVirtPkt[dram_pkt->rank] != dram_pkt->preReq) {
                     // The addrVirtPkt has not been fired, turn the bus around for it.
                     DPRINTF(VMC, "Virtual addr not ready, turn bus to WRITE\n");
                     virtAddrNeeded = true;
@@ -2052,6 +2066,7 @@ DRAMCtrl::processNextReqEvent()
                     // register is claimed, and it is waiting for clearence upon some
                     // respEvent, we should not hog the bus by retrying this req until
                     // that respEvent is handled.
+                    // TODO: when to retry?
                     return;
                 } else {
                     DPRINTF(VMC, "Claming addr register for rank %d\n", dram_pkt->rank);
@@ -2062,7 +2077,7 @@ DRAMCtrl::processNextReqEvent()
                 // to keep the order between virtual pkts. So that if we encounter
                 // a virutal write, the corresponding virtual address should already
                 // be in the register.
-                DPRINTF(VMC, "Virtual write pkt to rank %d encountered\n",
+                DPRINTF(VMC, "Virtual write to rank %d encountered\n",
                         dram_pkt->rank);
                 assert(readyVirtPkt[dram_pkt->rank] == dram_pkt->preReq);
                 DPRINTF(VMC, "Address ready for current virual %s pkt\n",
