@@ -279,6 +279,9 @@ class DRAMCtrl : public AbstractMemory
          REF_RUN
      };
 
+    // weil0ng: forward decl.
+    class DRAMPacket;
+
     /**
      * Rank class includes a vector of banks. Refresh and Power state
      * machines are defined per rank. Events required to change the
@@ -441,6 +444,12 @@ class DRAMCtrl : public AbstractMemory
          * term are made from several banks.
          */
         std::vector<Bank> banks;
+
+        /** weil0ng:
+         * Address registers per rank. 
+         * TODO: design knob. For now, FIFO structure.
+         */
+        std::deque<DRAMPacket*> addrRegs;
 
         /**
          *  To track number of banks which are currently active for
@@ -619,9 +628,6 @@ class DRAMCtrl : public AbstractMemory
      * A VMCHelper helps remember which short DRAMPackets 
      * an consolidated DRAMPacket has.
      */
-    // Forward decl.
-    class DRAMPacket;
-
     class VMCHelper {
 
         public:
@@ -743,12 +749,6 @@ class DRAMCtrl : public AbstractMemory
 
     };
 
-    // weil0ng: each rank can only hold one set of pending
-    // addrVirtPkt and virtPkt.
-    std::map<uint8_t, DRAMPacket*> pendingAddrVirtPkt;
-    std::map<uint8_t, DRAMPacket*> pendingVirtPkt;
-    // weil0ng: one address register per rank.
-    std::map<uint8_t, DRAMPacket*> readyVirtPkt;
     bool virtAddrNeeded;
 
     /**
@@ -1062,6 +1062,7 @@ class DRAMCtrl : public AbstractMemory
     // weil0ng: size for VMC buffer
     const uint32_t vmcReadBufferSize;
     const uint32_t vmcWriteBufferSize;
+    const uint32_t addrRegsPerRank;
     const uint32_t writeBufferSize;
     const uint32_t writeHighThreshold;
     const uint32_t writeLowThreshold;

@@ -82,6 +82,7 @@ DRAMCtrl::DRAMCtrl(const DRAMCtrlParams* p) :
     readBufferSize(p->read_buffer_size),
     vmcReadBufferSize(p->vmc_read_buffer_size), // weil0ng: init vmc buffers here
     vmcWriteBufferSize(p->vmc_write_buffer_size),
+    addrRegsPerRank(p->addr_regs_per_rank), // weil0ng: init addrRegs size here
     writeBufferSize(p->write_buffer_size),
     writeHighThreshold(writeBufferSize * p->write_high_thresh_perc / 100.0),
     writeLowThreshold(writeBufferSize * p->write_low_thresh_perc / 100.0),
@@ -114,6 +115,7 @@ DRAMCtrl::DRAMCtrl(const DRAMCtrlParams* p) :
 
         rank->actTicks.resize(activationLimit, 0);
         rank->banks.resize(banksPerRank);
+        rank->addrRegs.clear();
         rank->rank = i;
 
         for (int b = 0; b < banksPerRank; b++) {
@@ -262,10 +264,6 @@ DRAMCtrl::startup()
     // weil0ng: set the pageMgmt
     pageMgmt = system()->getPagePolicy();
 
-    // weil0ng: set up vmc queues
-    for (auto i=0; i<ranksPerChannel; ++i) {
-        readyVirtPkt[i] = NULL;
-    }
     for (auto i=0; i<ranksPerChannel * devicesPerRank; ++i) {
         devRdQ[i] = std::deque<DRAMPacket*>();
         devWrQ[i] = std::deque<DRAMPacket*>();
@@ -1152,8 +1150,10 @@ DRAMCtrl::processRespondEvent()
             }
         }
         // weil0ng: clear the rank register.
-        DPRINTF(VMC, "Clearing addr register for rank %d\n", dram_pkt->rank);
-        readyVirtPkt[dram_pkt->rank] = NULL;
+        DPRINTF(VMC, "Poping addrRegs on rank %d\n", dram_pkt->rank);
+        assert(!dram_pkt->rankRef.addrRegs.empty());
+        dram_pkt->rankRef.addrRegs.pop_front();
+        DPRINTF(VMC, "Current addrRegs size %d\n", dram_pkt->rankRef.addrRegs.size());
         delete dram_pkt->vmcHelper;
         dram_pkt->vmcHelper = NULL;
     } else if (dram_pkt->burstHelper) {
@@ -1959,8 +1959,14 @@ DRAMCtrl::processNextReqEvent()
                 DPRINTF(VMC, "Virtual read to rank %d encountered\n", dram_pkt->rank);
                 // Since this is a read, it cannot be addrVirtPkt.
                 assert(!dram_pkt->carryAddr);
-                if (!readyVirtPkt[dram_pkt->rank] || readyVirtPkt[dram_pkt->rank] != dram_pkt->preReq) {
-                    // The addrVirtPkt has not been fired, turn the bus around for it.
+                // It must have a preReq pkt.
+                assert(dram_pkt->preReq);
+                // weil0ng: if the front of addrRegs does not precedes dram_pkt due to:
+                // 1. addrRegs are empty, then we turn bus to write to fire the push pkt.
+                // 2. some other push pkt at front, then we turn bus to write to fire the push
+                //    pkt which will only be fired when other clears the addrRegs.
+                if (dram_pkt->rankRef.addrRegs.empty() ||
+                        dram_pkt->rankRef.addrRegs.front() != dram_pkt->preReq) {
                     DPRINTF(VMC, "Virtual addr not ready, turn bus to WRITE\n");
                     virtAddrNeeded = true;
                     busStateNext = WRITE;
@@ -1970,11 +1976,8 @@ DRAMCtrl::processNextReqEvent()
                         schedule(nextReqEvent, std::max(nextReqTime, curTick()));
                     return;
                 } else {
-                    // weil0ng: IMPORTANT. We rely on the fact that the mem scheduler
-                    // keeps the order of virtual pkts, otherwise, we might get stuck
-                    // in a deadlock when the register has a different pkt than what
-                    // the scheduler picks. Error out in this case.
-                    assert(readyVirtPkt[dram_pkt->rank] == dram_pkt->preReq);
+                    // weil0ng: we are ready to go.
+                    assert(dram_pkt->rankRef.addrRegs.front() == dram_pkt->preReq);
                     DPRINTF(VMC, "Address ready for current virtual %s pkt\n",
                             dram_pkt->isRead?"read":"write");
                 }
@@ -2049,15 +2052,13 @@ DRAMCtrl::processNextReqEvent()
 
         if (dram_pkt->isVirtual) {
             if (dram_pkt->carryAddr) {
-                DPRINTF(VMC, "Virtual addressing pkt to rank %d encountered\n",
+                assert(dram_pkt->follower);
+                DPRINTF(VMC, "PUSH to rank %d encountered\n",
                         dram_pkt->rank);
-                // weil0ng: we are assuming a one-entry register on rank,
-                // so if the register already has an unsued address do not
-                // fire this one. TODO: if we have a larger register on rank,
-                // we can fire multiple virtAddrPkts.
-                if (readyVirtPkt[dram_pkt->rank]) {
+                assert(dram_pkt->rankRef.addrRegs.size() <= addrRegsPerRank);
+                if (dram_pkt->rankRef.addrRegs.size() == addrRegsPerRank) {
                     // Turn the bus around for reads.
-                    DPRINTF(VMC, "Rank %d register occupied, turn bus to READ, nextReqTime %llu\n",
+                    DPRINTF(VMC, "Rank %d addrRegs full, turn bus to READ, nextReqTime %llu\n",
                             dram_pkt->rank, nextReqTime);
                     busStateNext = READ;
                     if (switched_cmd_type && dram_pkt->rank == activeRank)
@@ -2069,21 +2070,27 @@ DRAMCtrl::processNextReqEvent()
                     // TODO: when to retry?
                     return;
                 } else {
-                    DPRINTF(VMC, "Claming addr register for rank %d\n", dram_pkt->rank);
-                    readyVirtPkt[dram_pkt->rank] = dram_pkt;
+                    DPRINTF(VMC, "Claming addrRegs entry on rank %d\n", dram_pkt->rank);
+                    dram_pkt->rankRef.addrRegs.push_back(dram_pkt);
+                    DPRINTF(VMC, "Current addrRegs size %d\n", dram_pkt->rankRef.addrRegs.size());
                 }
             } else {
-                // weil0ng: IMPORTANT. We are relying on the mem scheduler
-                // to keep the order between virtual pkts. So that if we encounter
-                // a virutal write, the corresponding virtual address should already
-                // be in the register.
-                DPRINTF(VMC, "Virtual write to rank %d encountered\n",
-                        dram_pkt->rank);
-                assert(readyVirtPkt[dram_pkt->rank] == dram_pkt->preReq);
-                DPRINTF(VMC, "Address ready for current virual %s pkt\n",
-                        dram_pkt->isRead?"read":"write");
-                DPRINTF(VMC, "Clearing addr register for rank %d\n", dram_pkt->rank);
-                readyVirtPkt[dram_pkt->rank] = NULL;
+                assert(!dram_pkt->carryAddr);
+                assert(dram_pkt->preReq);
+                DPRINTF(VMC, "Virtual write to rank %d encountered\n",dram_pkt->rank);
+                if (dram_pkt->rankRef.addrRegs.empty() ||
+                        dram_pkt->rankRef.addrRegs.front() != dram_pkt->preReq) {
+                    // TODO: when to retry?
+                    DPRINTF(VMC, "Virtual addr not ready, do nothing and wait for retry\n");
+                } else {
+                    assert(dram_pkt->rankRef.addrRegs.front() == dram_pkt->preReq);
+                    DPRINTF(VMC, "Address ready for current virtual %s pkt\n",
+                            dram_pkt->isRead?"read":"write");
+                    DPRINTF(VMC, "Clearing addrRegs on rank %d\n", dram_pkt->rank);
+                    assert(!dram_pkt->rankRef.addrRegs.empty());
+                    dram_pkt->rankRef.addrRegs.pop_front();
+                    DPRINTF(VMC, "Current addrRegs size %d\n", dram_pkt->rankRef.addrRegs.size());
+                }
             }
         }
 
