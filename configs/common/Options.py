@@ -84,6 +84,9 @@ def addNoISAOptions(parser):
                       help = "number of memory channels")
     parser.add_option("--mem-ranks", type="int", default=None,
                       help = "number of memory ranks per channel")
+    # weil0ng: vmc options.
+    parser.add_option("--addr-regs", type="int", default=1,
+                      help = "number of address registers on rank for vmc mode")
     parser.add_option("--mem-size", action="store", type="string",
                       default="512MB",
                       help="Specify the physical memory size (single memory)")

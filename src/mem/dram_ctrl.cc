@@ -288,8 +288,8 @@ DRAMCtrl::startup()
         busBusyUntil = curTick() + tRP + tRCD + tCL;
     }
 
-    DPRINTF(DRAM, "Startup params: timing %s, page policy %s\n",
-            isTimingMode ? "True" : "False", pageMgmt);
+    DPRINTF(VMC, "Startup params: timing %s, page policy %s, addrRegs %d\n",
+            isTimingMode ? "True" : "False", pageMgmt, addrRegsPerRank);
 }
 
 Tick
@@ -1226,9 +1226,13 @@ DRAMCtrl::chooseNext(std::deque<DRAMPacket*>& queue,
                 break;
             }
         }
-        // weil0ng: should always be true. Otherwise, we have a
-        // pending virtual read without its corresponding virtAddrPkt.
-        assert(found_packet);
+        // weil0ng: done searching, if found, issue PUSH,
+        // otherwise it must have already been in addrRegs.
+        if (!found_packet) {
+            Rank& cur_rank = readQueue.front()->rankRef;
+            assert(std::find(cur_rank.addrRegs.begin(), cur_rank.addrRegs.end(),
+                        readQueue.front()->preReq) != cur_rank.addrRegs.end());
+        }
         virtAddrNeeded = false;
         return found_packet;
     }
