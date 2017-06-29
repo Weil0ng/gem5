@@ -900,12 +900,14 @@ bool
 DRAMCtrl::recvTimingReq(PacketPtr pkt)
 {
     // This is where we enter from the outside world
-    DPRINTF(DRAM, "recvTimingReq: request %s addr %#08x size %d\n",
-            pkt->cmdString(), pkt->getAddr(), pkt->getSize());
+    DPRINTF(DRAM, "recvTimingReq from %d: request %s addr %#08x size %d\n",
+            pkt->req->contextId(), pkt->cmdString(),
+            pkt->getAddr(), pkt->getSize());
     if (system()->isVMCMode()) {
         DPRINTF(VMC, "=============%s============\n", curTick());
-        DPRINTF(VMC, "recvTimingReq: request %s addr %#08x size %d vmc %s\n",
-                pkt->cmdString(), pkt->getAddr(), pkt->getSize(), system()->isVMCMode());
+        DPRINTF(VMC, "recvTimingReq from %d: request %s addr %#08x size %d vmc %s\n",
+                pkt->req->contextId(), pkt->cmdString(), pkt->getAddr(),
+                pkt->getSize(), system()->isVMCMode());
     }
     panic_if(pkt->cacheResponding(), "Should not see packets where cache "
              "is responding");
@@ -974,6 +976,7 @@ DRAMCtrl::dPrintEventCount(uint8_t rank, bool inc, std::string reason = std::str
  */
 void
 DRAMCtrl::dPrintAddrRegs(uint8_t rank) {
+    return;
     if (!system()->isVMCMode())
         return;
     DPRINTF(VMC, "****************************\n");
@@ -992,6 +995,7 @@ DRAMCtrl::dPrintAddrRegs(uint8_t rank) {
 
 void
 DRAMCtrl::dPrintAddrRegs() {
+    return;
     if (!system()->isVMCMode())
         return;
     DPRINTF(VMC, "****************************\n");
@@ -1343,7 +1347,6 @@ DRAMCtrl::chooseNext(std::deque<DRAMPacket*>& queue,
             Rank& cur_rank = dram_pkt->rankRef;
             if (dram_pkt->isVirtual) {
                 if (dram_pkt->carryAddr) {
-                    //DPRINTF(VMC, "Checking ready for PUSH (%d)\n", dram_pkt->id);
                     if (cur_rank.addrRegs.size() < addrRegsPerRank) {
                         queue.erase(i);
                         queue.push_front(dram_pkt);
@@ -1351,8 +1354,6 @@ DRAMCtrl::chooseNext(std::deque<DRAMPacket*>& queue,
                         break;
                     }
                 } else {
-                    //DPRINTF(VMC, "Checking ready for virt %s pkt (%d)\n",
-                    //        dram_pkt->isRead?"read":"write", dram_pkt->id);
                     bool addrReady = (std::find(cur_rank.addrRegs.begin(), cur_rank.addrRegs.end(),
                             dram_pkt->preReq) != cur_rank.addrRegs.end());
                     if ((addrReady || cur_rank.addrRegs.size() < addrRegsPerRank) && 
@@ -2096,8 +2097,6 @@ DRAMCtrl::processNextReqEvent()
                     if (!cur_rank->addrRegs.empty()) {
                         for (auto p = cur_rank->addrRegs.begin(); p != cur_rank->addrRegs.end(); p++) {
                             DRAMPacket* push_pkt = *p;
-                            DPRINTF(VMC, "Checking PUSH (%d) on rank %d for following wr\n",
-                                    push_pkt->id, push_pkt->rank);
                             assert(push_pkt->isVirtual);
                             assert(push_pkt->carryAddr);
                             if (!push_pkt->follower->isRead) {
