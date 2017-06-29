@@ -79,19 +79,23 @@ def get_processes(options):
     errouts = []
     pargs = []
 
-    workloads = options.cmd.split(';')
+    workloads = options.cmd.split(':')
     if options.input != "":
-        inputs = options.input.split(';')
+        inputs = options.input.split(':')
     if options.output != "":
-        outputs = options.output.split(';')
+        outputs = options.output.split(':')
     if options.errout != "":
-        errouts = options.errout.split(';')
+        errouts = options.errout.split(':')
     if options.options != "":
-        pargs = options.options.split(';')
+        pargs = options.options.split(':')
+
+    print workloads, pargs
 
     idx = 0
     for wrkld in workloads:
         process = Process()
+        # weil0ng: temp workaround for multi-programmed configs.
+        process.pid = 100 + idx
         process.executable = wrkld
         process.cwd = os.getcwd()
 

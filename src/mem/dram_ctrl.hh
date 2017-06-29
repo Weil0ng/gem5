@@ -659,6 +659,8 @@ class DRAMCtrl : public AbstractMemory
     class DRAMPacket {
 
       public:
+        // weil0ng: keep track of uid.
+        static std::atomic<int> sid;
 
         /** When did request enter the controller */
         const Tick entryTime;
@@ -731,6 +733,10 @@ class DRAMCtrl : public AbstractMemory
          */
         DRAMPacket* follower;
 
+        /** weil0ng: id for debug tracking
+         */
+        int id;
+
         DRAMPacket(PacketPtr _pkt, bool is_read, bool is_virtual, 
                    bool carry_addr, uint8_t _rank, uint8_t _bank,
                    uint32_t _row, uint8_t _device, uint16_t bank_id,
@@ -744,7 +750,7 @@ class DRAMCtrl : public AbstractMemory
               bankId(bank_id), addr(_addr), size(_size),
               burstHelper(NULL), bankRef(bank_ref),
               rankRef(rank_ref), vmcHelper(NULL),
-              preReq(NULL)
+              preReq(NULL), follower(NULL), id(++sid)
         { }
 
     };
@@ -1163,6 +1169,8 @@ class DRAMCtrl : public AbstractMemory
     Stats::Histogram bytesPerActivate;
     Stats::Histogram rdPerTurnAround;
     Stats::Histogram wrPerTurnAround;
+    // weil0ng: record packing efficiency.
+    Stats::Histogram pckLength;
 
     // Latencies summed over all requests
     Stats::Scalar totQLat;
@@ -1277,6 +1285,10 @@ class DRAMCtrl : public AbstractMemory
     // weil0ng: try packing short pkts to generate a virtual dram pkt
     // and dispatch to the mem_ctrl.
     void tryPackAndDispatch();
+    // weil0ng: debug only, print addrRegs.
+    void dPrintAddrRegs(uint8_t rank);
+    void dPrintAddrRegs();
+    void dPrintEventCount(uint8_t rank, bool inc, std::string reason);
 };
 
 #endif //__MEM_DRAM_CTRL_HH__
