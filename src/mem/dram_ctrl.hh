@@ -755,6 +755,7 @@ class DRAMCtrl : public AbstractMemory
 
     };
 
+    // weil0ng: indicate chooseNext to find PUSH.
     bool virtAddrNeeded;
 
     /**
@@ -768,6 +769,13 @@ class DRAMCtrl : public AbstractMemory
 
     void processRespondEvent();
     EventWrapper<DRAMCtrl, &DRAMCtrl::processRespondEvent> respondEvent;
+
+    /** weil0ng:
+     * We need a new type of event to trigger packAndDispatch
+     * from dev Qs to Read/Write Qs.
+     */
+    void processPackEvent();
+    EventWrapper<DRAMCtrl, &DRAMCtrl::processPackEvent> packEvent;
 
     /**
      * Check if the read queue has room for more entries
@@ -1143,6 +1151,16 @@ class DRAMCtrl : public AbstractMemory
      * and access, it is tRP + tRCD + tCL.
      */
     Tick nextReqTime;
+
+    /** weil0ng:
+     * The longest wait time between packings.
+     */
+    Tick packWaitTime;
+
+    /** weil0ng:
+     * The lastest time when we have to do a pack and dispatch.
+     */
+    Tick nextPackTime;
 
     // All statistics that the model needs to capture
     Stats::Scalar readReqs;
