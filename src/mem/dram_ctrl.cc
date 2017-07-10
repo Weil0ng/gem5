@@ -766,8 +766,6 @@ DRAMCtrl::addToDevReadQueue(PacketPtr pkt, uint8_t device, unsigned short_pkt_co
     if (burst_helper != NULL)
         burst_helper->burstsServiced = pktsServicedByDevWrQ;
     
-    tryPackAndDispatch();
-    return;
     // weil0ng: TODO design knob. What machenism we should use?
     if (!packEvent.scheduled()) {
         DPRINTF(VMC, "Schedule pack event @ %lld", curTick());
@@ -812,8 +810,6 @@ DRAMCtrl::addToDevWriteQueue(PacketPtr pkt, uint8_t device, unsigned short_pkt_c
     // TODO: 1) accessAndRespond 2) schedule
     accessAndRespond(pkt, frontendLatency); // weil0ng: is this correct?
 
-    tryPackAndDispatch();
-    return;
     // weil0ng: TODO design knob. What machenism we should use?
     if (!packEvent.scheduled()) {
         DPRINTF(VMC, "Schedule pack event @ %lld", curTick());
@@ -2150,7 +2146,7 @@ DRAMCtrl::processNextReqEvent()
                 //    pkt which will only be fired when other clears the addrRegs.
                 if (dram_pkt->rankRef.addrRegs.empty() ||
                         dram_pkt->rankRef.addrRegs.front() != dram_pkt->preReq) {
-                    DPRINTF(VMC, "Virt addr for current pkt (%d) not ready, turn bus to WRITE\n",
+                    DPRINTF(VMC, "Virt addr for current pkt (%d) not ready\n",
                             dram_pkt->id);
                     virtAddrNeeded = true;
                     DPRINTF(VMC, "Bus turns to WRITE\n");
@@ -2161,7 +2157,7 @@ DRAMCtrl::processNextReqEvent()
                         schedule(nextReqEvent, std::max(nextReqTime, curTick()));
                     return;
                 } else {
-                    // weil0ng: if rank not available, retry.
+                    // weil0ng: if rank not available, retry. TODO: decouple dram chips.
                     if (!dram_pkt->rankRef.isAvailable())
                         return;
                     // weil0ng: otherwise, we are ready to go.
@@ -2242,7 +2238,7 @@ DRAMCtrl::processNextReqEvent()
 
         DRAMPacket* dram_pkt = writeQueue.front();
         // weil0ng: now that chooseNext doesn't check rank availability for virt writes,
-        // we need to check it here.
+        // we need to check it here. TODO: decouple dram chips.
         if (!dram_pkt->rankRef.isAvailable())
             return;
         // weil0ng: add or condition for PUSH.
