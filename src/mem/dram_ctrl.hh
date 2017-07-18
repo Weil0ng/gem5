@@ -134,6 +134,11 @@ class DRAMCtrl : public AbstractMemory
     bool isTimingMode;
 
     /**
+     * weil0ng: remember if the memory system is in VMC mode
+     */
+    bool isVMCMode;
+
+    /**
      * Remember if we have to retry a request when available.
      */
     bool retryRdReq;
@@ -279,25 +284,22 @@ class DRAMCtrl : public AbstractMemory
          REF_RUN
      };
 
-    // weil0ng: forward decl.
-    class DRAMPacket;
+    // weil0ng: forward declaration.
+    class Rank;
 
-    /**
-     * Rank class includes a vector of banks. Refresh and Power state
-     * machines are defined per rank. Events required to change the
-     * state of the refresh and power state machine are scheduled per
-     * rank. This class allows the implementation of rank-wise refresh
-     * and rank-wise power-down.
-     */
-    class Rank : public EventManager
+    class Device : public EventManager
     {
-
       private:
 
         /**
          * A reference to the parent DRAMCtrl instance
          */
         DRAMCtrl& memory;
+
+        /**
+         * A reference to the hosting Rank instance
+         */
+        Rank& rank_ref;
 
         /**
          * Since we are taking decisions out of order, we need to keep
@@ -404,6 +406,11 @@ class DRAMCtrl : public AbstractMemory
          */
         uint8_t rank;
 
+        /**
+         * Current Device index
+         */
+        uint8_t device;
+
        /**
          * Track number of packets in read queue going to this rank
          */
@@ -445,6 +452,317 @@ class DRAMCtrl : public AbstractMemory
          */
         std::vector<Bank> banks;
 
+        /**
+         *  To track number of banks which are currently active for
+         *  this rank.
+         */
+        unsigned int numBanksActive;
+
+        /** List to keep track of activate ticks */
+        std::deque<Tick> actTicks;
+
+        Device(DRAMCtrl& _memory, Rank& _rank,
+                const DRAMCtrlParams* _p, const uint8_t _device);
+
+        const std::string name() const
+        {
+            return csprintf("%s_%d_%d", memory.name(), rank, device);
+        }
+
+        /**
+         * Kick off accounting for power and refresh states and
+         * schedule initial refresh.
+         *
+         * @param ref_tick Tick for first refresh
+         */
+        void startup(Tick ref_tick);
+
+        /**
+         * Stop the refresh events.
+         */
+        void suspend();
+
+        /**
+         * Check if the current rank is available for scheduling.
+         * Rank will be unavailable if refresh is ongoing.
+         * This includes refresh events explicitly scheduled from the the
+         * controller or memory initiated events which will occur during
+         * self-refresh mode.
+         *
+         * @param Return true if the rank is idle from a refresh point of view
+         */
+        bool isAvailable() const { return refreshState == REF_IDLE; }
+
+        /**
+         * Check if the current rank has all banks closed and is not
+         * in a low power state
+         *
+         * @param Return true if the rank is idle from a bank
+         *        and power point of view
+         */
+        bool inPwrIdleState() const { return pwrState == PWR_IDLE; }
+
+        /**
+         * Trigger a self-refresh exit if there are entries enqueued
+         * Exit if there are any read entries regardless of the bus state.
+         * If we are currently issuing write commands, exit if we have any
+         * write commands enqueued as well.
+         * Could expand this in the future to analyze state of entire queue
+         * if needed.
+         *
+         * @return boolean indicating self-refresh exit should be scheduled
+         */
+        bool forceSelfRefreshExit() const {
+            return (readEntries != 0) ||
+                   ((memory.busStateNext == WRITE) && (writeEntries != 0));
+        }
+
+        /**
+         * Check if the current rank is idle and should enter a low-pwer state
+         *
+         * @param Return true if the there are no read commands in Q
+         *                    and there are no outstanding events
+         */
+        bool lowPowerEntryReady() const;
+
+        /**
+         * Let the rank check if it was waiting for requests to drain
+         * to allow it to transition states.
+         */
+        void checkDrainDone();
+
+        /**
+         * Push command out of cmdList queue that are scheduled at
+         * or before curTick() to DRAMPower library
+         * All commands before curTick are guaranteed to be complete
+         * and can safely be flushed.
+         */
+        void flushCmdList();
+
+        /**
+         * weil0ng: copy state from hosting rank
+         */
+        void copyStateFromRank();
+
+        /*
+         * Function to register Stats
+         */
+        void regStats();
+
+        /**
+         * Computes stats just prior to dump event
+         */
+        void computeStats();
+
+        /**
+         * Schedule a transition to power-down (sleep)
+         *
+         * @param pwr_state Power state to transition to
+         * @param tick Absolute tick when transition should take place
+         */
+        void powerDownSleep(PowerState pwr_state, Tick tick);
+
+       /**
+         * schedule and event to wake-up from power-down or self-refresh
+         * and update bank timing parameters
+         *
+         * @param exit_delay Relative tick defining the delay required between
+         *                   low-power exit and the next command
+         */
+        void scheduleWakeUpEvent(Tick exit_delay);
+
+        void processWriteDoneEvent();
+        EventWrapper<Device, &Device::processWriteDoneEvent>
+        writeDoneEvent;
+
+        void processActivateEvent();
+        EventWrapper<Device, &Device::processActivateEvent>
+        activateEvent;
+
+        void processPrechargeEvent();
+        EventWrapper<Device, &Device::processPrechargeEvent>
+        prechargeEvent;
+
+        void processRefreshEvent();
+        EventWrapper<Device, &Device::processRefreshEvent>
+        refreshEvent;
+
+        void processPowerEvent();
+        EventWrapper<Device, &Device::processPowerEvent>
+        powerEvent;
+
+        void processWakeUpEvent();
+        EventWrapper<Device, &Device::processWakeUpEvent>
+        wakeUpEvent;
+    };
+
+    class DRAMPacket;
+
+    /**
+     * Rank class includes a vector of banks. Refresh and Power state
+     * machines are defined per rank. Events required to change the
+     * state of the refresh and power state machine are scheduled per
+     * rank. This class allows the implementation of rank-wise refresh
+     * and rank-wise power-down.
+     */
+    class Rank : public EventManager
+    {
+
+      public:
+
+        /**
+         * A reference to the parent DRAMCtrl instance
+         */
+        DRAMCtrl& memory;
+
+        /**
+         * Since we are taking decisions out of order, we need to keep
+         * track of what power transition is happening at what time
+         */
+        PowerState pwrStateTrans;
+
+        /**
+         * Previous low-power state, which will be re-entered after refresh.
+         */
+        PowerState pwrStatePostRefresh;
+
+        /**
+         * Track when we transitioned to the current power state
+         */
+        Tick pwrStateTick;
+
+        /**
+         * Keep track of when a refresh is due.
+         */
+        Tick refreshDueAt;
+
+        /*
+         * Command energies
+         */
+        Stats::Scalar actEnergy;
+        Stats::Scalar preEnergy;
+        Stats::Scalar readEnergy;
+        Stats::Scalar writeEnergy;
+        Stats::Scalar refreshEnergy;
+
+        /*
+         * Active Background Energy
+         */
+        Stats::Scalar actBackEnergy;
+
+        /*
+         * Precharge Background Energy
+         */
+        Stats::Scalar preBackEnergy;
+
+        /*
+         * Active Power-Down Energy
+         */
+        Stats::Scalar actPowerDownEnergy;
+
+        /*
+         * Precharge Power-Down Energy
+         */
+        Stats::Scalar prePowerDownEnergy;
+
+        /*
+         * self Refresh Energy
+         */
+        Stats::Scalar selfRefreshEnergy;
+
+        Stats::Scalar totalEnergy;
+        Stats::Scalar averagePower;
+
+        /**
+         * Stat to track total DRAM idle time
+         *
+         */
+        Stats::Scalar totalIdleTime;
+
+        /**
+         * Track time spent in each power state.
+         */
+        Stats::Vector pwrStateTime;
+
+        /**
+         * Function to update Power Stats
+         */
+        void updatePowerStats();
+
+        /**
+         * Schedule a power state transition in the future, and
+         * potentially override an already scheduled transition.
+         *
+         * @param pwr_state Power state to transition to
+         * @param tick Tick when transition should take place
+         */
+        void schedulePowerEvent(PowerState pwr_state, Tick tick);
+
+      //public:
+
+        /**
+         * Current power state.
+         */
+        PowerState pwrState;
+
+       /**
+         * current refresh state
+         */
+        RefreshState refreshState;
+
+        /**
+         * rank is in or transitioning to power-down or self-refresh
+         */
+        bool inLowPowerState;
+
+        /**
+         * Current Rank index
+         */
+        uint8_t rank;
+
+       /**
+         * Track number of packets in read queue going to this rank
+         */
+        uint32_t readEntries;
+
+       /**
+         * Track number of packets in write queue going to this rank
+         */
+        uint32_t writeEntries;
+
+        /**
+         * Number of ACT, RD, and WR events currently scheduled
+         * Incremented when a refresh event is started as well
+         * Used to determine when a low-power state can be entered
+         */
+        uint8_t outstandingEvents;
+
+        /**
+         * delay power-down and self-refresh exit until this requirement is met
+         */
+        Tick wakeUpAllowedAt;
+
+        /**
+         * One DRAMPower instance per rank
+         */
+        DRAMPower power;
+
+        /**
+         * List of comamnds issued, to be sent to DRAMPpower at refresh
+         * and stats dump.  Keep commands here since commands to different
+         * banks are added out of order.  Will only pass commands up to
+         * curTick() to DRAMPower after sorting.
+         */
+        std::vector<Command> cmdList;
+
+        /**
+         * Vector of Banks. Each rank is made of several devices which in
+         * term are made from several banks.
+         */
+        std::vector<Bank> banks;
+
+        std::vector<Device*> devices;
+
         /** weil0ng:
          * Address registers per rank. 
          * TODO: design knob. For now, FIFO structure.
@@ -460,7 +778,7 @@ class DRAMCtrl : public AbstractMemory
         /** List to keep track of activate ticks */
         std::deque<Tick> actTicks;
 
-        Rank(DRAMCtrl& _memory, const DRAMCtrlParams* _p);
+        Rank(DRAMCtrl& _memory, const DRAMCtrlParams* _p, const uint8_t _rank);
 
         const std::string name() const
         {
@@ -536,6 +854,11 @@ class DRAMCtrl : public AbstractMemory
          * and can safely be flushed.
          */
         void flushCmdList();
+
+        /**
+         * weil0ng: collect states from devices of this rank
+         */
+        void collectStatesFromDevices();
 
         /*
          * Function to register Stats
@@ -756,7 +1079,16 @@ class DRAMCtrl : public AbstractMemory
     };
 
     // weil0ng: indicate chooseNext to find PUSH.
-    bool virtAddrNeeded;
+    bool waitingForPush;
+
+    /** weil0ng:
+     * The following two functions copy states from rank to devices
+     * when the system switches to VMC mode and copy/check states from
+     * devices back to rank when exiting VMC mode.
+     */
+    void rankState2DeviceStates();
+
+    void deviceStates2RankState();
 
     /**
      * Bunch of things requires to setup "events" in gem5

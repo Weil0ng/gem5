@@ -62,10 +62,10 @@ using namespace Data;
 DRAMCtrl::DRAMCtrl(const DRAMCtrlParams* p) :
     AbstractMemory(p),
     port(name() + ".port", *this),
-    isTimingMode(false),
+    isTimingMode(false), isVMCMode(false),
     retryRdReq(false), retryWrReq(false),
     busState(READ), busStateNext(READ),
-    virtAddrNeeded(false),
+    waitingForPush(false),
     nextReqEvent(this), respondEvent(this),
     packEvent(this), // weil0ng: register pack event
     deviceSize(p->device_size),
@@ -113,13 +113,12 @@ DRAMCtrl::DRAMCtrl(const DRAMCtrlParams* p) :
              "must be a power of two\n", burstSize);
 
     for (int i = 0; i < ranksPerChannel; i++) {
-        Rank* rank = new Rank(*this, p);
+        Rank* rank = new Rank(*this, p, i);
         ranks.push_back(rank);
 
         rank->actTicks.resize(activationLimit, 0);
         rank->banks.resize(banksPerRank);
         rank->addrRegs.clear();
-        rank->rank = i;
 
         for (int b = 0; b < banksPerRank; b++) {
             rank->banks[b].bank = b;
@@ -905,6 +904,50 @@ DRAMCtrl::printQs() const {
     }
 }
 
+void
+DRAMCtrl::Rank::collectStatesFromDevices() {
+    // TODO: reset internal states and only copy over stats?
+    // Only call this when all short pkts are done?
+}
+
+void
+DRAMCtrl::Device::copyStateFromRank() {
+    assert(rank_ref.rank == rank);
+    this->pwrStateTrans = rank_ref.pwrStateTrans;
+    this->pwrStatePostRefresh = rank_ref.pwrStatePostRefresh;
+    this->pwrStateTick = rank_ref.pwrStateTick;
+    this->refreshDueAt = rank_ref.refreshDueAt;
+    // TODO: copy stats?
+    this->pwrState = rank_ref.pwrState;
+    this->refreshState = rank_ref.refreshState;
+    this->inLowPowerState = rank_ref.inLowPowerState;
+    this->readEntries = rank_ref.readEntries;
+    this->writeEntries = rank_ref.writeEntries;
+    this->outstandingEvents = rank_ref.outstandingEvents;
+    this->wakeUpAllowedAt = rank_ref.wakeUpAllowedAt;
+    this->power = rank_ref.power;
+    this->cmdList = rank_ref.cmdList;
+    this->banks = rank_ref.banks;
+    this->numBanksActive = rank_ref.numBanksActive;
+    this->actTicks = rank_ref.actTicks;
+}
+
+void
+DRAMCtrl::rankState2DeviceStates()
+{
+    for (int i=0; i<ranksPerChannel; ++i) {
+        for (auto d : ranks[i]->devices) {
+            d->copyStateFromRank();
+        }
+    }
+}
+
+void
+DRAMCtrl::deviceStates2RankState()
+{
+    
+}
+
 // weil0ng: this serves as the on-chip buffer for VMC.
 bool
 DRAMCtrl::recvTimingReq(PacketPtr pkt)
@@ -914,11 +957,21 @@ DRAMCtrl::recvTimingReq(PacketPtr pkt)
             pkt->req->contextId(), pkt->cmdString(),
             pkt->getAddr(), pkt->getSize());
     if (system()->isVMCMode()) {
+        if (!isVMCMode) {
+            DPRINTF(VMC, "Entering VMC mode\n");
+            isVMCMode = true;
+        }
         DPRINTF(VMC, "=============%s============\n", curTick());
         DPRINTF(VMC, "recvTimingReq from %d: request %s addr %#08x size %d vmc %s\n",
                 pkt->req->contextId(), pkt->cmdString(), pkt->getAddr(),
                 pkt->getSize(), system()->isVMCMode());
+    } else {
+        if (isVMCMode) {
+            DPRINTF(VMC, "Exiting VMC mode\n");
+            isVMCMode = false;
+        }
     }
+
     panic_if(pkt->cacheResponding(), "Should not see packets where cache "
              "is responding");
 
@@ -1311,7 +1364,7 @@ DRAMCtrl::chooseNext(std::deque<DRAMPacket*>& queue,
     
     // bool to indicate if a packet to an available rank is found
     bool found_packet = false;
-    if (virtAddrNeeded) {
+    if (waitingForPush) {
         assert(!readQueue.empty() && readQueue.front()->isVirtual);
         DPRINTF(VMC, "Searching for PUSH (%d) to rank %d\n",
                 readQueue.front()->preReq->id, readQueue.front()->rank);
@@ -1331,7 +1384,7 @@ DRAMCtrl::chooseNext(std::deque<DRAMPacket*>& queue,
             assert(std::find(cur_rank.addrRegs.begin(), cur_rank.addrRegs.end(),
                         readQueue.front()->preReq) != cur_rank.addrRegs.end());
         }
-        virtAddrNeeded = false;
+        waitingForPush = false;
         return found_packet;
     }
 
@@ -2148,7 +2201,7 @@ DRAMCtrl::processNextReqEvent()
                         dram_pkt->rankRef.addrRegs.front() != dram_pkt->preReq) {
                     DPRINTF(VMC, "Virt addr for current pkt (%d) not ready\n",
                             dram_pkt->id);
-                    virtAddrNeeded = true;
+                    waitingForPush = true;
                     DPRINTF(VMC, "Bus turns to WRITE\n");
                     busStateNext = WRITE;
                     if (switched_cmd_type && dram_pkt->rank == activeRank)
@@ -2461,16 +2514,44 @@ DRAMCtrl::minBankPrep(const deque<DRAMPacket*>& queue,
     return make_pair(bank_mask, hidden_bank_prep);
 }
 
-DRAMCtrl::Rank::Rank(DRAMCtrl& _memory, const DRAMCtrlParams* _p)
-    : EventManager(&_memory), memory(_memory),
+DRAMCtrl::Device::Device(DRAMCtrl& _memory, Rank& _rank,
+        const DRAMCtrlParams* _p, const uint8_t _device)
+    : EventManager(&_memory), memory(_memory), rank_ref(_rank),
       pwrStateTrans(PWR_IDLE), pwrStatePostRefresh(PWR_IDLE),
       pwrStateTick(0), refreshDueAt(0), pwrState(PWR_IDLE),
-      refreshState(REF_IDLE), inLowPowerState(false), rank(0),
+      refreshState(REF_IDLE), inLowPowerState(false), rank(_rank.rank), device(_device),
       readEntries(0), writeEntries(0), outstandingEvents(0),
       wakeUpAllowedAt(0), power(_p, false), numBanksActive(0),
       writeDoneEvent(*this), activateEvent(*this), prechargeEvent(*this),
       refreshEvent(*this), powerEvent(*this), wakeUpEvent(*this)
-{ }
+{
+    actTicks.resize(memory.activationLimit, 0);
+    banks.resize(memory.banksPerRank);
+    for (int b=0; b<memory.banksPerRank; ++b) {
+        banks[b].bank = b;
+        if (memory.bankGroupArch) {
+            banks[b].bankgr = b % memory.bankGroupsPerRank;
+        } else {
+            banks[b].bankgr = b;
+        }
+    }
+}
+
+DRAMCtrl::Rank::Rank(DRAMCtrl& _memory, const DRAMCtrlParams* _p, const uint8_t _rank)
+    : EventManager(&_memory), memory(_memory),
+      pwrStateTrans(PWR_IDLE), pwrStatePostRefresh(PWR_IDLE),
+      pwrStateTick(0), refreshDueAt(0), pwrState(PWR_IDLE),
+      refreshState(REF_IDLE), inLowPowerState(false), rank(_rank),
+      readEntries(0), writeEntries(0), outstandingEvents(0),
+      wakeUpAllowedAt(0), power(_p, false), numBanksActive(0),
+      writeDoneEvent(*this), activateEvent(*this), prechargeEvent(*this),
+      refreshEvent(*this), powerEvent(*this), wakeUpEvent(*this)
+{
+    for (int i=0; i<memory.devicesPerRank; ++i) {
+        Device* device = new Device(_memory, *this, _p, i);
+        devices.push_back(device);
+    }
+}
 
 void
 DRAMCtrl::Rank::startup(Tick ref_tick)
@@ -2511,6 +2592,18 @@ DRAMCtrl::Rank::lowPowerEntryReady() const
     } else {
        // ensure no commands in Q and no commands scheduled
        return (no_queued_cmds && (outstandingEvents == 0));
+    }
+}
+
+bool
+DRAMCtrl::Device::lowPowerEntryReady() const
+{
+    bool no_queued_cmds = ((memory.busStateNext == READ) && (readEntries == 0)) ||
+        ((memory.busStateNext == WRITE) && (writeEntries == 0));
+    if (refreshState == REF_RUN) {
+        return no_queued_cmds;
+    } else {
+        return (no_queued_cmds && (outstandingEvents == 0));
     }
 }
 
@@ -2558,12 +2651,37 @@ DRAMCtrl::Rank::flushCmdList()
 }
 
 void
+DRAMCtrl::Device::flushCmdList() {
+    sort(cmdList.begin(), cmdList.end(), DRAMCtrl::sortTime);
+
+    auto next_iter = cmdList.begin();
+    for (; next_iter != cmdList.end(); ++next_iter) {
+        Command cmd = *next_iter;
+        if (cmd.timeStamp <= curTick()) {
+            power.powerlib.doCommand(cmd.type, cmd.bank,
+                    divCeil(cmd.timeStamp, memory.tCK) -
+                    memory.timeStampOffset);
+        } else {
+            break;
+        }
+    }
+    cmdList.assign(next_iter, cmdList.end());
+}
+
+void
 DRAMCtrl::Rank::processActivateEvent()
 {
     // we should transition to the active state as soon as any bank is active
     if (pwrState != PWR_ACT)
         // note that at this point numBanksActive could be back at
         // zero again due to a precharge scheduled in the future
+        schedulePowerEvent(PWR_ACT, curTick());
+}
+
+void
+DRAMCtrl::Device::processActivateEvent()
+{
+    if (pwrState != PWR_ACT)
         schedulePowerEvent(PWR_ACT, curTick());
 }
 
@@ -2601,6 +2719,22 @@ DRAMCtrl::Rank::processPrechargeEvent()
 }
 
 void
+DRAMCtrl::Device::processPrechargeEvent()
+{
+    assert(outstandingEvents > 0);
+    --outstandingEvents;
+    if (numBanksActive == 0) {
+        if (lowPowerEntryReady()) {
+            assert(pwrState == PWR_ACT);
+            DPRINTF(VMC, "Rank %d device %d goes to sleep\n", rank, device);
+            powerDownSleep(PWR_PRE_PDN, curTick());
+        } else {
+            schedulePowerEvent(PWR_IDLE, curTick());
+        }
+    }
+}
+
+void
 DRAMCtrl::Rank::processWriteDoneEvent()
 {
     // counter should at least indicate one outstanding request
@@ -2609,9 +2743,13 @@ DRAMCtrl::Rank::processWriteDoneEvent()
     // Write transfer on bus has completed
     // decrement per rank counter
     --outstandingEvents;
-    std::ostringstream oss;
-    oss << "write done";
-    memory.dPrintEventCount(rank, false, oss.str());
+}
+
+void
+DRAMCtrl::Device::processWriteDoneEvent()
+{
+    assert(outstandingEvents > 0);
+    --outstandingEvents;
 }
 
 void
@@ -2818,6 +2956,105 @@ DRAMCtrl::Rank::processRefreshEvent()
 }
 
 void
+DRAMCtrl::Device::processRefreshEvent()
+{
+    if ((refreshState == REF_IDLE) || (refreshState == REF_SREF_EXIT)) {
+        refreshDueAt = curTick();
+        refreshState = REF_DRAIN;
+        ++outstandingEvents;
+    }
+    
+    if (refreshState == REF_DRAIN) {
+        if ((rank == memory.activeRank) &&
+                (memory.nextReqEvent.scheduled())) {
+            return;
+        }
+    } else {
+        refreshState = REF_PD_EXIT;
+    }
+
+    if (refreshState == REF_PD_EXIT) {
+        if (inLowPowerState) {
+            scheduleWakeUpEvent(memory.tXP);
+            return;
+        } else {
+            refreshState = REF_PRE;
+        }
+    }
+
+    if (refreshState == REF_PRE) {
+        if (numBanksActive != 0) {
+            Tick pre_at = curTick();
+            for (auto &b : banks) {
+                pre_at = std::max(b.preAllowedAt, pre_at);
+            }
+            Tick act_allowed_at = pre_at + memory.tRP;
+            for (auto &b : banks) {
+                if (b.openRow != Bank::NO_ROW) {
+                    memory.prechargeBank(rank_ref, b, pre_at, false);
+                } else {
+                    b.actAllowedAt = std::max(b.actAllowedAt, act_allowed_at);
+                    b.preAllowedAt = std::max(b.preAllowedAt, pre_at);
+                }
+            }
+            cmdList.push_back(Command(MemCommand::PREA, 0, pre_at));
+        } else if ((pwrState == PWR_IDLE) && (outstandingEvents == 1)) {
+            schedulePowerEvent(PWR_REF, curTick());
+        } else {
+            assert(prechargeEvent.scheduled());
+        }
+        assert(numBanksActive == 0);
+        return;
+    }
+
+    if (refreshState == REF_START) {
+        assert(numBanksActive == 0);
+        assert(pwrState == PWR_REF);
+
+        Tick ref_done_at = curTick() + memory.tRFC;
+
+        for (auto &b : banks) {
+            b.actAllowedAt = ref_done_at;
+        }
+        cmdList.push_back(Command(MemCommand::REF, 0, curTick()));
+
+        updatePowerStats();
+
+        refreshDueAt += memory.tREFI;
+
+        if (refreshDueAt < ref_done_at)
+            fatal("Refresh was delayed so long we cannot catch up\n");
+
+        refreshState = REF_RUN;
+        schedule(refreshEvent, ref_done_at);
+        return;
+    }
+
+    if (refreshState == REF_RUN) {
+        assert(numBanksActive == 0);
+        assert(pwrState == PWR_REF);
+        assert(!powerEvent.scheduled());
+        if ((memory.drainState() == DrainState::Draining) ||
+                memory.drainState() == DrainState::Drained) {
+            schedulePowerEvent(PWR_IDLE, curTick());
+        } else {
+            if (pwrStatePostRefresh != PWR_IDLE) {
+                assert(pwrState == PWR_REF);
+                powerDownSleep(pwrState, curTick());
+            } else if (lowPowerEntryReady()) {
+                powerDownSleep(PWR_PRE_PDN, curTick());
+            } else {
+                schedulePowerEvent(PWR_IDLE, curTick());
+            }
+        }
+        
+        if (pwrStateTrans != PWR_SREF) {
+            schedule(refreshEvent, refreshDueAt - memory.tRP);
+        }
+    }
+}
+
+void
 DRAMCtrl::Rank::schedulePowerEvent(PowerState pwr_state, Tick tick)
 {
     // respect causality
@@ -2835,6 +3072,20 @@ DRAMCtrl::Rank::schedulePowerEvent(PowerState pwr_state, Tick tick)
         panic("Scheduled power event at %llu to state %d, "
               "with scheduled event at %llu to %d\n", tick, pwr_state,
               powerEvent.when(), pwrStateTrans);
+    }
+}
+
+void
+DRAMCtrl::Device::schedulePowerEvent(PowerState pwr_state, Tick tick)
+{
+    assert(tick >= curTick());
+    if (!powerEvent.scheduled()) {
+        pwrStateTrans = pwr_state;
+        schedule(powerEvent, tick);
+    } else {
+        panic("Scheduled power event at %llu to stat %d, "
+                "with scheduled event at %llu to %d\n",
+                tick, pwr_state, powerEvent.when(), pwrStateTrans);
     }
 }
 
@@ -2893,6 +3144,29 @@ DRAMCtrl::Rank::powerDownSleep(PowerState pwr_state, Tick tick)
 }
 
 void
+DRAMCtrl::Device::powerDownSleep(PowerState pwr_state, Tick tick)
+{
+    if (pwr_state == PWR_ACT_PDN) {
+        schedulePowerEvent(pwr_state, tick);
+        cmdList.push_back(Command(MemCommand::PDN_F_ACT, 0, tick));
+    } else if (pwr_state == PWR_PRE_PDN) {
+        schedulePowerEvent(pwr_state, tick);
+        cmdList.push_back(Command(MemCommand::PDN_F_PRE, 0, tick));
+    } else if (pwr_state == PWR_REF) {
+        if (pwrStatePostRefresh == PWR_ACT_PDN || !lowPowerEntryReady()) {
+            schedulePowerEvent(PWR_PRE_PDN, tick);
+            cmdList.push_back(Command(MemCommand::PDN_F_PRE, 0, tick));
+        } else {
+            assert(pwrStatePostRefresh == PWR_PRE_PDN);
+            schedulePowerEvent(PWR_SREF, tick);
+            cmdList.push_back(Command(MemCommand::SREN, 0, tick));
+        }
+    }
+    wakeUpAllowedAt = tick + memory.tCK;
+    inLowPowerState = true;
+}
+
+void
 DRAMCtrl::Rank::scheduleWakeUpEvent(Tick exit_delay)
 {
     Tick wake_up_tick = std::max(curTick(), wakeUpAllowedAt);
@@ -2944,6 +3218,35 @@ DRAMCtrl::Rank::scheduleWakeUpEvent(Tick exit_delay)
 }
 
 void
+DRAMCtrl::Device::scheduleWakeUpEvent(Tick exit_delay)
+{
+    Tick wake_up_tick = std::max(curTick(), wakeUpAllowedAt);
+
+    if (refreshState == REF_PD_EXIT) {
+        pwrStatePostRefresh = pwrState;
+    } else {
+        pwrStatePostRefresh = PWR_IDLE;
+    }
+
+    schedule(wakeUpEvent, wake_up_tick);
+
+    for (auto &b : banks) {
+        b.colAllowedAt = std::max(wake_up_tick + exit_delay, b.colAllowedAt);
+        b.preAllowedAt = std::max(wake_up_tick + exit_delay, b.preAllowedAt);
+        b.actAllowedAt = std::max(wake_up_tick + exit_delay, b.actAllowedAt);
+    }
+    inLowPowerState = false;
+
+    if (pwrStateTrans == PWR_ACT_PDN) {
+        cmdList.push_back(Command(MemCommand::PUP_ACT, 0, wake_up_tick));
+    } else if (pwrStateTrans == PWR_PRE_PDN) {
+        cmdList.push_back(Command(MemCommand::PUP_PRE, 0, wake_up_tick));
+    } else if (pwrStateTrans == PWR_SREF) {
+        cmdList.push_back((Command(MemCommand::SREX, 0, wake_up_tick)));
+    }
+}
+
+void
 DRAMCtrl::Rank::processWakeUpEvent()
 {
     // Should be in a power-down or self-refresh state
@@ -2959,6 +3262,17 @@ DRAMCtrl::Rank::processWakeUpEvent()
         // banks are closed - transition to PWR_IDLE
         schedulePowerEvent(PWR_IDLE, curTick());
     }
+}
+
+void
+DRAMCtrl::Device::processWakeUpEvent()
+{
+    assert(pwrState == PWR_ACT_PDN || pwrState == PWR_PRE_PDN ||
+            pwrState == PWR_SREF);
+    if (pwrState == PWR_ACT_PDN)
+        schedulePowerEvent(PWR_ACT, curTick());
+    else
+        schedulePowerEvent(PWR_IDLE, curTick());
 }
 
 void
@@ -3074,6 +3388,65 @@ DRAMCtrl::Rank::processPowerEvent()
 }
 
 void
+DRAMCtrl::Device::processPowerEvent()
+{
+    assert(curTick() >= pwrStateTick);
+    Tick duration = curTick() - pwrStateTick;
+    PowerState prev_state = pwrState;
+    pwrStateTime[prev_state] += duration;
+
+    if ((prev_state == PWR_PRE_PDN) || (prev_state == PWR_ACT_PDN) || (prev_state == PWR_SREF)) {
+        totalIdleTime += duration;
+    }
+
+    pwrState = pwrStateTrans;
+    pwrStateTick = curTick();
+
+    if (prev_state == PWR_REF) {
+        assert(outstandingEvents == 1);
+        --outstandingEvents;
+        if (pwrState != PWR_IDLE) {
+            assert((pwrState == PWR_PRE_PDN) || (pwrState == PWR_SREF));
+        }
+        if (pwrState != PWR_SREF) {
+            refreshState = REF_IDLE;
+        }
+        if (!memory.nextReqEvent.scheduled()) {
+            schedule(memory.nextReqEvent, curTick());
+        }
+    } else if (pwrState == PWR_ACT) {
+        if (refreshState == REF_PD_EXIT) {
+            assert(prev_state == PWR_ACT_PDN);
+            refreshState = REF_PRE;
+            schedule(refreshEvent, curTick());
+        }
+    } else if (pwrState == PWR_IDLE) {
+        if (prev_state == PWR_SREF) {
+            refreshState = REF_SREF_EXIT;
+            schedule(refreshEvent, curTick() + memory.tXS);
+        } else {
+            if ((refreshState == REF_PRE) || (refreshState == REF_PD_EXIT)) {
+                if (!activateEvent.scheduled()) {
+                    assert(!powerEvent.scheduled());
+                    pwrState = PWR_REF;
+                } else {
+                    assert(prechargeEvent.scheduled());
+                }
+            }
+        }
+    }
+    
+    if (pwrState == PWR_REF) {
+        assert(refreshState == REF_PRE || refreshState == REF_PD_EXIT);
+        if (refreshState == REF_PD_EXIT)
+            schedule(refreshEvent, curTick() + memory.tRP);
+        else
+            schedule(refreshEvent, curTick());
+        refreshState = REF_START;
+    }
+}
+
+void
 DRAMCtrl::Rank::updatePowerStats()
 {
     // All commands up to refresh have completed
@@ -3111,6 +3484,29 @@ DRAMCtrl::Rank::updatePowerStats()
     selfRefreshEnergy = energy.sref_energy * memory.devicesPerRank;
     totalEnergy = energy.total_energy * memory.devicesPerRank;
     averagePower = rank_power.average_power * memory.devicesPerRank;
+}
+
+void
+DRAMCtrl::Device::updatePowerStats()
+{
+    flushCmdList();
+    power.powerlib.updateCounters(false);
+    power.powerlib.calcEnergy();
+    Data::MemoryPowerModel::Energy energy = power.powerlib.getEnergy();
+    Data::MemoryPowerModel::Power device_power = power.powerlib.getPower();
+
+    actEnergy = energy.act_energy;
+    preEnergy = energy.pre_energy;
+    readEnergy = energy.read_energy;
+    writeEnergy = energy.write_energy;
+    refreshEnergy = energy.ref_energy;
+    actBackEnergy = energy.act_stdby_energy;
+    preBackEnergy = energy.pre_stdby_energy;
+    actPowerDownEnergy = energy.f_act_pd_energy;
+    prePowerDownEnergy = energy.f_pre_pd_energy;
+    selfRefreshEnergy = energy.sref_energy;
+    totalEnergy = energy.total_energy;
+    averagePower = device_power.average_power;
 }
 
 void
@@ -3201,6 +3597,76 @@ DRAMCtrl::Rank::regStats()
 
     registerDumpCallback(new RankDumpCallback(this));
 }
+
+void
+DRAMCtrl::Device::regStats()
+{
+    using namespace Stats;
+
+    pwrStateTime
+        .init(6)
+        .name(name() + ".memoryStateTime")
+        .desc("Time in different power states");
+    pwrStateTime.subname(0, "IDLE");
+    pwrStateTime.subname(1, "REF");
+    pwrStateTime.subname(2, "SREF");
+    pwrStateTime.subname(3, "PRE_PDN");
+    pwrStateTime.subname(4, "ACT");
+    pwrStateTime.subname(5, "ACT_PDN");
+
+    actEnergy
+        .name(name() + ".actEnergy")
+        .desc("Energy for activate commands per device (pJ)");
+
+    preEnergy
+        .name(name() + ".preEnergy")
+        .desc("Energy for precharge commands per device (pJ)");
+
+    readEnergy
+        .name(name() + ".readEnergy")
+        .desc("Energy for read commands per device (pJ)");
+
+    writeEnergy
+        .name(name() + ".writeEnergy")
+        .desc("Energy for write commands per device (pJ)");
+
+    refreshEnergy
+        .name(name() + ".refreshEnergy")
+        .desc("Energy for refresh commands per device (pJ)");
+
+    actBackEnergy
+        .name(name() + ".actBackEnergy")
+        .desc("Energy for active background per device (pJ)");
+
+    preBackEnergy
+        .name(name() + ".preBackEnergy")
+        .desc("Energy for precharge background per device (pJ)");
+
+    actPowerDownEnergy
+        .name(name() + ".actPowerDownEnergy")
+        .desc("Energy for active power-down per device (pJ)");
+
+    prePowerDownEnergy
+        .name(name() + ".prePowerDownEnergy")
+        .desc("Energy for precharge power-down per device (pJ)");
+
+    selfRefreshEnergy
+        .name(name() + ".selfRefreshEnergy")
+        .desc("Energy for self refresh per device (pJ)");
+
+    totalEnergy
+        .name(name() + ".totalEnergy")
+        .desc("Total energy per device (pJ)");
+
+    averagePower
+        .name(name() + ".averagePower")
+        .desc("Core power per device (mW)");
+
+    totalIdleTime
+        .name(name() + ".totalIdleTime")
+        .desc("Total Idle time Per DRAM device");
+}
+
 void
 DRAMCtrl::regStats()
 {
@@ -3210,6 +3676,9 @@ DRAMCtrl::regStats()
 
     for (auto r : ranks) {
         r->regStats();
+        for (auto d : r->devices) {
+            d->regStats();
+        }
     }
 
     readReqs
