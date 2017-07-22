@@ -205,6 +205,15 @@ class DRAMCtrl : public AbstractMemory
             colAllowedAt(0), preAllowedAt(0), actAllowedAt(0),
             rowAccesses(0), bytesAccessed(0)
         { }
+
+        void reset() {
+            openRow = NO_ROW;
+            colAllowedAt = 0;
+            preAllowedAt = 0;
+            actAllowedAt = 0;
+            rowAccesses = 0;
+            bytesAccessed = 0;
+        }
     };
 
 
@@ -412,12 +421,12 @@ class DRAMCtrl : public AbstractMemory
         uint8_t device;
 
        /**
-         * Track number of packets in read queue going to this rank
+         * Track number of packets in read queue going to this device
          */
         uint32_t readEntries;
 
        /**
-         * Track number of packets in write queue going to this rank
+         * Track number of packets in write queue going to this device
          */
         uint32_t writeEntries;
 
@@ -855,10 +864,14 @@ class DRAMCtrl : public AbstractMemory
          */
         void flushCmdList();
 
-        /**
-         * weil0ng: collect states from devices of this rank
+        /** weil0ng:
+         * collect stats from devices of this rank and reset all
+         * internal states, issue a refresh to restart.
+         *
+         * Should only be called when exiting VMC mode and after
+         * all remaining virtual pkts are dealt with.
          */
-        void collectStatesFromDevices();
+        void collectStatsAndRestart();
 
         /*
          * Function to register Stats
@@ -1038,6 +1051,7 @@ class DRAMCtrl : public AbstractMemory
          * If not a split packet (common case), this is set to NULL
          */
         BurstHelper* burstHelper;
+        Device& deviceRef;
         Bank& bankRef;
         Rank& rankRef;
 
@@ -1063,17 +1077,17 @@ class DRAMCtrl : public AbstractMemory
         DRAMPacket(PacketPtr _pkt, bool is_read, bool is_virtual, 
                    bool carry_addr, uint8_t _rank, uint8_t _bank,
                    uint32_t _row, uint8_t _device, uint16_t bank_id,
-                   Addr _addr, unsigned int _size, Bank& bank_ref,
-                   Rank& rank_ref)
+                   Addr _addr, unsigned int _size, Device& dev_ref,
+                   Bank& bank_ref, Rank& rank_ref)
             : entryTime(curTick()), readyTime(curTick()),
               pkt(_pkt), isRead(is_read),
               isVirtual(is_virtual), carryAddr(carry_addr),
               rank(_rank), bank(_bank),
               row(_row), device(_device),
               bankId(bank_id), addr(_addr), size(_size),
-              burstHelper(NULL), bankRef(bank_ref),
-              rankRef(rank_ref), vmcHelper(NULL),
-              preReq(NULL), follower(NULL), id(++sid)
+              burstHelper(NULL), deviceRef(dev_ref),
+              bankRef(bank_ref), rankRef(rank_ref),
+              vmcHelper(NULL), preReq(NULL), follower(NULL), id(++sid)
         { }
 
     };
@@ -1086,9 +1100,9 @@ class DRAMCtrl : public AbstractMemory
      * when the system switches to VMC mode and copy/check states from
      * devices back to rank when exiting VMC mode.
      */
-    void rankState2DeviceStates();
+    void splitRankToDevices(uint8_t rank);
 
-    void deviceStates2RankState();
+    void mergeDevicesToRank(uint8_t rank);
 
     /**
      * Bunch of things requires to setup "events" in gem5
@@ -1203,6 +1217,10 @@ class DRAMCtrl : public AbstractMemory
      */
     Tick doBankAccess(DRAMPacket* dram_pkt, Tick busBusyUntil);
 
+    Tick doSingleBankAccess(DRAMPacket* dram_pkt, Tick busBusyUntil);
+
+    Tick doMultiBankAccess(DRAMPacket* dram_pkt, Tick busBusyUntil);
+
     /**
      * When a packet reaches its "readyTime" in the response Q,
      * use the "access()" method in AbstractMemory to actually
@@ -1301,6 +1319,9 @@ class DRAMCtrl : public AbstractMemory
      */
     void activateBank(Rank& rank_ref, Bank& bank_ref, Tick act_tick,
                       uint32_t row);
+    
+    void activateBank(Device& device_ref, Bank& bank_ref,
+                      Tick act_tick, uint32_t row);
 
     /**
      * Precharge a given bank and also update when the precharge is
@@ -1313,6 +1334,9 @@ class DRAMCtrl : public AbstractMemory
      * @param trace Is this an auto precharge then do not add to trace
      */
     void prechargeBank(Rank& rank_ref, Bank& bank_ref,
+                       Tick pre_at, bool trace = true);
+
+    void prechargeBank(Device& device_ref, Bank& bank_ref,
                        Tick pre_at, bool trace = true);
 
     /**
