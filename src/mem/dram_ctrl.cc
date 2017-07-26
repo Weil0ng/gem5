@@ -49,6 +49,7 @@
 
 #include "base/bitfield.hh"
 #include "base/trace.hh"
+#include "debug/MemCtx.hh"
 #include "debug/DRAM.hh"
 #include "debug/DRAMPower.hh"
 #include "debug/DRAMState.hh"
@@ -673,7 +674,7 @@ DRAMCtrl::printDevReadQueueStatus() {
 
 void
 DRAMCtrl::printDevWriteQueueStatus() {
-    DPRINTF(VMC, "DevWrQ limit %d, current status:\n", vmcWriteBufferSize);
+    DPRINTF(Pack, "DevWrQ limit %d, current status:\n", vmcWriteBufferSize);
     string header_str("");
     string stat_str("");
     for (auto i=0; i<devicesPerRank * ranksPerChannel; ++i) {
@@ -688,7 +689,6 @@ DRAMCtrl::printDevWriteQueueStatus() {
 
 bool
 DRAMCtrl::devReadQueueFull(uint8_t device, unsigned pkt_count) {
-    printDevReadQueueStatus();
     for (auto i=0; i<pkt_count; ++i) {
         //if (devRdQ[device].size() + devRespQ[device].size() + 1 > vmcReadBufferSize)
         if (devRdQ[device].size() + 1 > vmcReadBufferSize)
@@ -699,7 +699,6 @@ DRAMCtrl::devReadQueueFull(uint8_t device, unsigned pkt_count) {
 
 bool
 DRAMCtrl::devWriteQueueFull(uint8_t device, unsigned pkt_count) {
-    printDevWriteQueueStatus();
     for (auto i=0; i<pkt_count; ++i) {
         if (devWrQ[device].size() + 1 > vmcWriteBufferSize)
             return true;
@@ -974,24 +973,16 @@ bool
 DRAMCtrl::recvTimingReq(PacketPtr pkt)
 {
     // This is where we enter from the outside world
-    DPRINTF(DRAM, "recvTimingReq from %d: request %s addr %#08x size %d\n",
-            pkt->req->contextId(), pkt->cmdString(),
-            pkt->getAddr(), pkt->getSize());
+    DPRINTF(MemCtx, "from %d\n", pkt->req->contextId());
+    DPRINTF(DRAM, "recvTimingReq: request %s addr %#08x size %d\n",
+            pkt->cmdString(), pkt->getAddr(), pkt->getSize());
     if (system()->isVMCMode()) {
         if (!isVMCMode) {
-            if (drain() == DrainState::Drained) {
-                DPRINTF(VMC, "Enter VMC mode\n");
-                isVMCMode = true;
-                for(int i=0; i<ranksPerChannel; ++i)
-                    splitRankToDevices(i);
-            } else {
-                DPRINTF(VMC, "Preparing for VMC mode, still draining\n");
-                if (pkt->isRead())
-                    retryRdReq = true;
-                else
-                    retryWrReq = true;
-                return false;
-            }
+            assert(drain() == DrainState::Drained);
+            DPRINTF(VMC, "Enter VMC mode\n");
+            isVMCMode = true;
+            for(int i=0; i<ranksPerChannel; ++i)
+                splitRankToDevices(i);
         }
         DPRINTF(VMC, "=============%s============\n", curTick());
         DPRINTF(VMC, "recvTimingReq from %d: request %s addr %#08x size %d vmc %s\n",
@@ -1636,8 +1627,8 @@ DRAMCtrl::reorderQueue(std::deque<DRAMPacket*>& queue, Tick extra_col_delay)
 void
 DRAMCtrl::accessAndRespond(PacketPtr pkt, Tick static_latency)
 {
-    if (system()->isVMCMode())
-        DPRINTF(VMC, "Responding to Address %#08x..\n",pkt->getAddr());
+    DPRINTF(MemCtx, "to %d\n", pkt->req->contextId());
+    DPRINTF(DRAM, "Responding to address %#08x..\n", pkt->getAddr());
 
     bool needsResponse = pkt->needsResponse();
     // do the actual memory access which also turns the packet into a
@@ -2960,7 +2951,7 @@ DRAMCtrl::processNextReqEvent()
             delete dram_pkt;
     }
 
-    if (!packEvent.scheduled()) {
+    if (isVMCMode && !packEvent.scheduled()) {
         DPRINTF(VMC, "Schedule pack event now\n");
         if (curTick() > nextPackTime) {
             schedule(packEvent, curTick());
@@ -4565,6 +4556,8 @@ DRAMCtrl::getSlavePort(const string &if_name, PortID idx)
 DrainState
 DRAMCtrl::drain()
 {
+    DPRINTF(VMC, "DRAM_ctrl trying to drain: read %d, write %d, resp %d\n",
+            readQueue.size(), writeQueue.size(), respQueue.size());
     // if there is anything in any of our internal queues, keep track
     // of that as well
     if (!(writeQueue.empty() && readQueue.empty() && respQueue.empty() &&

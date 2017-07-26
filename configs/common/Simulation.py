@@ -664,6 +664,8 @@ def run(options, root, testsys, cpu_class):
             print "Switching CPUS @ tick %s" % (m5.curTick())
             if options.use_graph_accelerator:
                 print "Turning VMC mode on @ tick %s" % (m5.curTick())
+                print "Start draining"
+                m5.drain()
                 testsys.switchVMCMode(True)
             print "Simulation ends instruction count:%d" % \
                     (testsys.switch_cpus_1[0].max_insts_any_thread)
