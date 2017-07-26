@@ -98,6 +98,8 @@ DebugFlag('CommMonitor')
 DebugFlag('DRAM')
 # weil0ng: add new debug flag
 DebugFlag('VMC')
+DebugFlag('Progress')
+DebugFlag('Pack')
 DebugFlag('DRAMPower')
 DebugFlag('DRAMState')
 DebugFlag('ExternalPort')
