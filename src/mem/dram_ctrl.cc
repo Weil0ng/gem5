@@ -1188,7 +1188,9 @@ DRAMCtrl::dispatchVirtualPkt(DRAMPacket* addrVirtPkt, DRAMPacket* virtPkt) {
     if (!dispatched) {
         assert(addrVirtPkt != NULL);
         assert(virtPkt != NULL);
+        delete addrVirtPkt->pkt;
         delete addrVirtPkt;
+        delete virtPkt->pkt;
         delete virtPkt;
     }
     return dispatched;
@@ -1351,6 +1353,7 @@ DRAMCtrl::processRespondEvent()
         DPRINTF(VMC, "Poping addrRegs on rank %d\n", dram_pkt->rank);
         assert(!dram_pkt->rankRef.addrRegs.empty());
         assert(dram_pkt->rankRef.addrRegs.front() != NULL);
+        delete dram_pkt->rankRef.addrRegs.front()->pkt;
         delete dram_pkt->rankRef.addrRegs.front();
         dram_pkt->rankRef.addrRegs.pop_front();
         dPrintAddrRegs();
