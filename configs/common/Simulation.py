@@ -516,11 +516,9 @@ def run(options, root, testsys, cpu_class):
     if options.standard_switch:
         switch_cpus = [TimingSimpleCPU(switched_out=True, cpu_id=(i))
                        for i in xrange(np)]
-        # weil0ng: temporary hack, to compare against TimingSimple.
-        #switch_cpus_1 = ([DerivO3CPU(switched_out=True, cpu_id=(i))
-        switch_cpus_1 = ([TimingSimpleCPU(switched_out=True, cpu_id=(i))
-                        for i in xrange(np)]
-                        # weil0ng: only TimingSimpleCPU can bypass cache entirely
+        # weil0ng: temporary hack, to compare against TimingSimple. 
+        # Only TimingSimpleCPU can bypass cache entirely
+        switch_cpus_1 = ([DerivO3CPU(switched_out=True, cpu_id=(i)) for i in xrange(np)]
                         if not options.use_graph_accelerator
                         else [TimingSimpleCPU(switched_out=True, cpu_id=(i)) for i in xrange(np)])
 
