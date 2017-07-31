@@ -980,10 +980,13 @@ class DRAMCtrl : public AbstractMemory
               return (*pkts)[i];
           }
 
-          ~VMCHelper() {
+          void destroyPkts() {
               assert(pkts);
-              for (auto p : *pkts)
+              for (DRAMPacket* p : *pkts)
                   delete p;
+          }
+
+          ~VMCHelper() {
               delete pkts;
           }
     };
@@ -1256,9 +1259,9 @@ class DRAMCtrl : public AbstractMemory
                            bool isRead);
 
     /**
-     * weil0ng: generate a virtual addressing pkt.
+     * weil0ng: generate a push pkt.
      */
-    DRAMPacket* decodeVirtualAddr(uint8_t rank);
+    DRAMPacket* generatePushPkt(uint8_t rank);
 
     /**
      * weil0ng: pack pkts into a virtual pkt.
