@@ -86,10 +86,12 @@ def addNoISAOptions(parser):
                       help = "number of memory ranks per channel")
     # weil0ng: vmc options.
     parser.add_option("--addr-regs", type="int", default=1,
-                      help = "number of address registers on rank for vmc mode")
+                      help = "number of address registers on rank in VMC mode")
+    parser.add_option("--pack-latency", default="8ns",
+                      help = "ns of waiting before packing in VMC mode")
     parser.add_option("--mem-size", action="store", type="string",
                       default="512MB",
-                      help="Specify the physical memory size (single memory)")
+                      help = "Specify the physical memory size (single memory)")
 
     # weil0ng: add cmd knob for page policy.
     parser.add_option("--page-policy", type="choice", default="open_adaptive",

@@ -295,8 +295,8 @@ DRAMCtrl::startup()
         busBusyUntil = curTick() + tRP + tRCD + tCL;
     }
 
-    DPRINTF(VMC, "Startup params: timing %s, page policy %s, addrRegs %d\n",
-            isTimingMode ? "True" : "False", pageMgmt, addrRegsPerRank);
+    DPRINTF(VMC, "Startup params: timing %s, page policy %s, addrRegs %d, packLatency %d\n",
+            isTimingMode ? "True" : "False", pageMgmt, addrRegsPerRank, packWaitTime);
 }
 
 Tick
