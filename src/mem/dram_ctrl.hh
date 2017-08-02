@@ -1517,6 +1517,11 @@ class DRAMCtrl : public AbstractMemory
     Tick packWaitTime;
 
     /** weil0ng:
+     * The threshold fraction of packing.
+     */
+    uint32_t packThres;
+
+    /** weil0ng:
      * The lastest time when we have to do a pack and dispatch.
      */
     Tick nextPackTime;
@@ -1568,14 +1573,18 @@ class DRAMCtrl : public AbstractMemory
     Stats::Formula busUtil;
     Stats::Formula busUtilRead;
     Stats::Formula busUtilWrite;
+    Stats::Formula busTraffic;
+    Stats::Scalar busRd2Wr;
+    Stats::Scalar busWr2Rd;
+    Stats::Formula busTurnaround;
 
     // Average queue lengths
     Stats::Average avgRdQLen;
     Stats::Average avgWrQLen;
 
     // weil0ng: stats for short reqs per dev.
-    Stats::Vector avgDevRdQLen;
-    Stats::Vector avgDevWrQLen;
+    Stats::AverageVector avgDevRdQLen;
+    Stats::AverageVector avgDevWrQLen;
 
     // Row hit count and rate
     Stats::Scalar readRowHits;
@@ -1659,6 +1668,9 @@ class DRAMCtrl : public AbstractMemory
     // weil0ng: similar to dispatch pkt, but deals with virtual pkts
     // w/o a valid PacketPtr.
     bool dispatchVirtualPkt(DRAMPacket* addrPkt, DRAMPacket* pkt);
+    // weil0ng: examine the device queues and see if we should start
+    // packig right away.
+    bool shouldStartPackNow(uint8_t rank, bool isRead);
     // weil0ng: try packing short pkts to generate a virtual dram pkt
     // and dispatch to the mem_ctrl.
     void tryPackAndDispatch();

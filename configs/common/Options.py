@@ -149,7 +149,7 @@ def addCommonOptions(parser):
                       help = "type of cpu to run with")
     parser.add_option("--checker", action="store_true");
     parser.add_option("--cpu-clock", action="store", type="string",
-                      default='2GHz',
+                      default='3GHz',
                       help="Clock for blocks running at CPU speed")
     parser.add_option("--smt", action="store_true", default=False,
                       help = """

@@ -518,7 +518,7 @@ def run(options, root, testsys, cpu_class):
                        for i in xrange(np)]
         # weil0ng: temporary hack, to compare against TimingSimple. 
         # Only TimingSimpleCPU can bypass cache entirely
-        switch_cpus_1 = ([DerivO3CPU(switched_out=True, cpu_id=(i)) for i in xrange(np)]
+        switch_cpus_1 = ([TimingSimpleCPU(switched_out=True, cpu_id=(i)) for i in xrange(np)]
                         if not options.use_graph_accelerator
                         else [TimingSimpleCPU(switched_out=True, cpu_id=(i)) for i in xrange(np)])
 

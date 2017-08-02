@@ -85,6 +85,8 @@ class DRAMCtrl(AbstractMemory):
     vmc_read_buffer_size = Param.Unsigned(4, "Number of vmc rdq entries")
     # weil0ng: max wait time before packing.
     pack_latency = Param.Latency('8ns', "Time to wait before packing")
+    # weil0ng: thres of packing.
+    pack_threshold = Param.Percent(75, "Threshold for pack")
 
     # threshold in percent for when to forcefully trigger writes and
     # start emptying the write buffer
