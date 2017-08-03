@@ -87,7 +87,7 @@ DRAMCtrl::DRAMCtrl(const DRAMCtrlParams* p) :
     readBufferSize(p->read_buffer_size),
     vmcReadBufferSize(p->vmc_read_buffer_size), // weil0ng: init vmc buffers
     vmcWriteBufferSize(p->vmc_write_buffer_size),
-    addrRegsPerRank(p->addr_regs_per_rank), // weil0ng: init addrRegs size
+    addrRegsPerDevice(p->addr_regs_per_device), // weil0ng: init addrRegs size
     writeBufferSize(p->write_buffer_size),
     writeHighThreshold(writeBufferSize * p->write_high_thresh_perc / 100.0),
     writeLowThreshold(writeBufferSize * p->write_low_thresh_perc / 100.0),
@@ -123,7 +123,6 @@ DRAMCtrl::DRAMCtrl(const DRAMCtrlParams* p) :
 
         rank->actTicks.resize(activationLimit, 0);
         rank->banks.resize(banksPerRank);
-        rank->addrRegs.clear();
 
         for (int b = 0; b < banksPerRank; b++) {
             rank->banks[b].bank = b;
@@ -450,20 +449,10 @@ DRAMCtrl::decodeAddr(PacketPtr pkt, Addr dramPktAddr, unsigned size,
     // ready time set to the current tick, the latter will be updated
     // later
     uint16_t bank_id = banksPerRank * rank + bank;
-    // weil0ng: actual dram packets are never virtual.
     DRAMPacket* new_pkt = new DRAMPacket(pkt, isRead, false, false,
             rank, bank, row, device, bank_id, dramPktAddr, size,
             *(ranks[rank]->devices[device]), ranks[rank]->banks[bank],
             *ranks[rank]);
-    return new_pkt;
-}
-
-DRAMCtrl::DRAMPacket*
-DRAMCtrl::generatePushPkt(uint8_t rank) {
-    DRAMPacket* new_pkt = new DRAMPacket(new Packet(new Request(), MemCmd()), false, true, true,
-            rank, 0, 0, 0, 0, 0, burstSize, *(ranks[rank]->devices[0]),
-            ranks[rank]->banks[0], *ranks[rank]);
-    DPRINTF(VMC, "Generating PUSH (%d) for rank %d\n", new_pkt->id, rank);
     return new_pkt;
 }
 
@@ -876,12 +865,11 @@ DRAMCtrl::tryPackAndDispatch() {
                 pkts.push_back(devRdQ[device].front());
         }
         if (!pkts.empty()) {
-            bool dispatched = dispatchVirtualPkt(generatePushPkt(rank), packShortPkts(pkts));
+            bool dispatched = dispatchPackPkt(packShortPkts(pkts));
             if (dispatched) {
                 for (uint8_t dev=0; dev<devicesPerRank; ++dev) {
                     uint8_t device = dev + rank_offset;
                     if (!devRdQ[device].empty()) {
-                        //devRespQ[device].push_back(devRdQ[device].front());
                         devRdQ[device].pop_front();
                     }
                 }
@@ -902,7 +890,7 @@ DRAMCtrl::tryPackAndDispatch() {
                 pkts.push_back(devWrQ[device].front());
         }
         if (!pkts.empty()) {
-            bool dispatched = dispatchVirtualPkt(generatePushPkt(rank), packShortPkts(pkts));
+            bool dispatched = dispatchPackPkt(packShortPkts(pkts));
             if (dispatched) {
                 for (uint8_t dev=0; dev<devicesPerRank; ++dev) {
                     uint8_t device = dev + rank_offset;
@@ -1131,18 +1119,14 @@ DRAMCtrl::dPrintAddrRegs() {
 }
 
 /** weil0ng:
- * Dispatch virtual packets into Read/WriteQueue. Delete pkt on failure. We will re-gen
- * them next time.
+ * Dispatch pack packet into Read/Write Queue. Delete pkt on failure. We will re-gen
+ * it next time.
  */
 bool
-DRAMCtrl::dispatchVirtualPkt(DRAMPacket* pushPkt, DRAMPacket* packPkt) {
+DRAMCtrl::dispatchPackPkt(DRAMPacket* packPkt) {
     // weil0ng: this is the vmc path.
     assert(isVMCMode);
-    packPkt->preReq = pushPkt;
-    pushPkt->follower = packPkt;
-    assert(pushPkt->isVirtual && pushPkt->carryAddr);
-    assert(packPkt->isVirtual && !packPkt->carryAddr);
-    assert(pushPkt->rank == packPkt->rank);
+    assert(packPkt->isVirtual);
 
     // Calc avg gap between virtual requests.
     if (prevArrival != 0) {
@@ -1154,15 +1138,12 @@ DRAMCtrl::dispatchVirtualPkt(DRAMPacket* pushPkt, DRAMPacket* packPkt) {
     }
     prevVirtualArrival = curTick();
 
-    // Virtual pkt always translate to exactly 1 dram pkt.
-    // There are 3 types of virtual pkts:
-    //   1. PUSH pkt, which has packed addresses as data.
-    //   2. Read pkt, which packs several small read pkts.
-    //   3. Write pkt, which packs several small write pkts.
-    // Each time, we insert a pair of PUSH and virtual pkt, i.e. either
-    // (1, 2) or (1, 3) to a rank.
+    // Pack pkt always translate to exactly 1 dram pkt.
+    // There are 2 types of pack pkts:
+    //   1. Read pkt, which packs several small read pkts.
+    //   2. Write pkt, which packs several small write pkts.
     bool dispatched = false;
-    uint8_t rank = pushPkt->rank;
+    uint8_t rank = packPkt->rank;
     if (writeQueueFull(1)) {
         DPRINTF(VMC, "Fail to dispatch PUSH (%d) because write queue full\n", pushPkt->id);
     } else if (packPkt->isRead) {
@@ -1510,7 +1491,7 @@ DRAMCtrl::chooseNext(std::deque<DRAMPacket*>& queue,
         } else {
             assert(isVMCMode);
             if (dram_pkt->carryAddr) {
-                found_packet = (dram_pkt->rankRef.addrRegs.size() < addrRegsPerRank);
+                found_packet = (dram_pkt->rankRef.addrRegs.size() < addrRegsPerDevice);
             } else {
                 DRAMPacket* first_pkt = (*(dram_pkt->vmcHelper))[0];
                 found_packet = first_pkt->deviceRef.isAvailable();
@@ -1542,7 +1523,7 @@ DRAMCtrl::chooseNext(std::deque<DRAMPacket*>& queue,
                 *i = dram_pkt;
             }*/
             if (dram_pkt->carryAddr) {
-                if (cur_rank.addrRegs.size() < addrRegsPerRank) {
+                if (cur_rank.addrRegs.size() < addrRegsPerDevice) {
                     queue.erase(i);
                     queue.push_front(dram_pkt);
                     found_packet = true;
@@ -1555,7 +1536,7 @@ DRAMCtrl::chooseNext(std::deque<DRAMPacket*>& queue,
                 /* DPRINTF(VMC, "Virt %s pkt (%d) address %s\n",
                         dram_pkt->isRead?"read":"write", dram_pkt->id,
                         addrReady?"ready":"not ready"); */
-                if (addrReady || (!addrReady && cur_rank.addrRegs.size() < addrRegsPerRank)) {
+                if (addrReady || (!addrReady && cur_rank.addrRegs.size() < addrRegsPerDevice)) {
                     queue.erase(i);
                     queue.push_front(dram_pkt);
                     found_packet = true;
@@ -2712,11 +2693,8 @@ DRAMCtrl::processNextReqEvent()
 
             // weil0ng: we check for virtual pkt if its' addresses are in the register.
             if (dram_pkt->isVirtual) {
-                DPRINTF(VMC, "Virt read (%d) to rank %d encountered\n", dram_pkt->id, dram_pkt->rank);
-                // Since this is a read, it cannot be PUSH.
+                DPRINTF(VMC, "Pack read (%d) to rank %d encountered\n", dram_pkt->id, dram_pkt->rank);
                 assert(!dram_pkt->carryAddr);
-                // It must have a preReq pkt.
-                assert(dram_pkt->preReq);
                 // weil0ng: if the front of addrRegs does not precedes dram_pkt due to:
                 // 1. addrRegs are empty, then we turn bus to write to fire the push pkt.
                 // 2. some other push pkt at front, then we turn bus to write to fire the push
@@ -2884,8 +2862,8 @@ DRAMCtrl::processNextReqEvent()
                 assert(dram_pkt->follower);
                 DPRINTF(VMC, "PUSH (%d) to rank %d encountered\n",
                         dram_pkt->id, dram_pkt->rank);
-                assert(dram_pkt->rankRef.addrRegs.size() <= addrRegsPerRank);
-                if (dram_pkt->rankRef.addrRegs.size() == addrRegsPerRank) {
+                assert(dram_pkt->rankRef.addrRegs.size() <= addrRegsPerDevice);
+                if (dram_pkt->rankRef.addrRegs.size() == addrRegsPerDevice) {
                     DPRINTF(VMC, "Rank %d addrRegs full, nextReqTime %llu\n",
                             dram_pkt->rank, nextReqTime);
                     if (switched_cmd_type && dram_pkt->rank == activeRank)
@@ -3169,6 +3147,7 @@ DRAMCtrl::Rank::Rank(DRAMCtrl& _memory, const DRAMCtrlParams* _p, const uint8_t 
 {
     for (int i=0; i<memory.devicesPerRank; ++i) {
         Device* device = new Device(_memory, *this, _p, i);
+        device->addrRegs.clear();
         devices.push_back(device);
     }
 }

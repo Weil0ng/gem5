@@ -79,7 +79,7 @@ class DRAMCtrl(AbstractMemory):
     read_buffer_size = Param.Unsigned(32, "Number of read queue entries")
 
     # weil0ng: rank register size.
-    addr_regs_per_rank = Param.Unsigned(1, "Number of addr regs per rank")
+    addr_regs_per_device = Param.Unsigned(1, "Number of addr regs per rank")
     # weil0ng: front end buffer sizes.
     vmc_write_buffer_size = Param.Unsigned(8, "Number of vmc wtq entries")
     vmc_read_buffer_size = Param.Unsigned(4, "Number of vmc rdq entries")

@@ -225,7 +225,7 @@ def config_mem(options, system):
                     "latency to 1ns."
 
             # weil0ng: config addr_regs/pack_latency.
-            mem_ctrl.addr_regs_per_rank = options.addr_regs
+            mem_ctrl.addr_regs_per_device = options.addr_regs
             mem_ctrl.pack_latency = options.pack_latency
             mem_ctrls.append(mem_ctrl)
 

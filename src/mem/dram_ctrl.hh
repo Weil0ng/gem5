@@ -465,6 +465,12 @@ class DRAMCtrl : public AbstractMemory
          */
         std::vector<Bank> banks;
 
+        /** weil0ng:
+         * Address registers per device. 
+         * TODO: design knob. For now, FIFO structure.
+         */
+        std::deque<DRAMPacket*> addrRegs;
+
         /**
          *  To track number of banks which are currently active for
          *  this rank.
@@ -776,12 +782,6 @@ class DRAMCtrl : public AbstractMemory
 
         std::vector<Device*> devices;
 
-        /** weil0ng:
-         * Address registers per rank. 
-         * TODO: design knob. For now, FIFO structure.
-         */
-        std::deque<DRAMPacket*> addrRegs;
-
         /**
          *  To track number of banks which are currently active for
          *  this rank.
@@ -1067,16 +1067,6 @@ class DRAMCtrl : public AbstractMemory
          */
         VMCHelper* vmcHelper;
 
-        /** weil0ng: pointer to the virtual address pkt that
-         * precedes this one.
-         */
-        DRAMPacket* preReq;
-
-        /** weil0ng: pointer to the virtual pkt that
-         * follows this one.
-         */
-        DRAMPacket* follower;
-
         /** weil0ng: id for debug tracking
          */
         int id;
@@ -1263,11 +1253,6 @@ class DRAMCtrl : public AbstractMemory
                            bool isRead);
 
     /**
-     * weil0ng: generate a push pkt.
-     */
-    DRAMPacket* generatePushPkt(uint8_t rank);
-
-    /**
      * weil0ng: pack pkts into a virtual pkt.
      */
     DRAMPacket* packShortPkts(std::deque<DRAMPacket*> pkts);
@@ -1439,7 +1424,7 @@ class DRAMCtrl : public AbstractMemory
     // weil0ng: size for VMC buffer
     const uint32_t vmcReadBufferSize;
     const uint32_t vmcWriteBufferSize;
-    const uint32_t addrRegsPerRank;
+    const uint32_t addrRegsPerDevice;
     const uint32_t writeBufferSize;
     const uint32_t writeHighThreshold;
     const uint32_t writeLowThreshold;
@@ -1683,9 +1668,9 @@ class DRAMCtrl : public AbstractMemory
     // Otherwise, the pkt should first go through a front-end buffer.
     bool recvTimingReq(PacketPtr pkt);
     bool dispatchPkt(PacketPtr pkt);
-    // weil0ng: similar to dispatch pkt, but deals with virtual pkts
-    // w/o a valid PacketPtr.
-    bool dispatchVirtualPkt(DRAMPacket* addrPkt, DRAMPacket* pkt);
+    // weil0ng: similar to dispatch pkt, but deals with pack pkts
+    // w/o an actual PacketPtr.
+    bool dispatchPackPkt(DRAMPacket* pkt);
     // weil0ng: examine the device queues and see if we should start
     // packig right away.
     bool shouldStartPackNow(uint8_t rank, bool isRead);
