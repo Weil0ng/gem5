@@ -2434,6 +2434,8 @@ DRAMCtrl::doMultiBankAccess(DRAMPacket* dram_pkt, Tick busBusyUntil) {
         }
 
         got_row_hit |= row_hit;
+
+        device.bytesAccessed[bank.bank] += burstSize / devicesPerRank;
     }
 
     // Update bus state
@@ -2606,6 +2608,8 @@ DRAMCtrl::processNextReqEvent()
 
             // now proceed to do the actual writes
             switched_cmd_type = true;
+
+            ++busRd2Wr;
         } else {
             DPRINTF(DRAM, "Switching to reads after %d writes with %d writes "
                     "waiting\n", writesThisTime, writeQueue.size());
@@ -2614,6 +2618,8 @@ DRAMCtrl::processNextReqEvent()
             writesThisTime = 0;
 
             switched_cmd_type = true;
+
+            ++busWr2Rd;
         }
         // update busState to match next state until next transition
         busState = busStateNext;
@@ -4312,6 +4318,11 @@ DRAMCtrl::Device::regStats()
     totalIdleTime
         .name(name() + ".totalIdleTime")
         .desc("Total Idle time Per DRAM device");
+
+    bytesAccessed
+        .name(name() + ".bytesAccessed")
+        .desc("Bytes accessed during VMC mode per bank")
+        .init(memory.banksPerRank);
 }
 
 void

@@ -394,6 +394,8 @@ class DRAMCtrl : public AbstractMemory
         void schedulePowerEvent(PowerState pwr_state, Tick tick);
 
       public:
+        // Make this public so that DRAMCtrl can directly update.
+        Stats::Vector bytesAccessed;
 
         /**
          * Current power state.
@@ -475,7 +477,7 @@ class DRAMCtrl : public AbstractMemory
 
         const std::string name() const
         {
-            return csprintf("%s_%d_%d", memory.name(), rank, device);
+            return csprintf("%s_r%d_d%d", memory.name(), rank, device);
         }
 
         /**
@@ -791,7 +793,7 @@ class DRAMCtrl : public AbstractMemory
 
         const std::string name() const
         {
-            return csprintf("%s_%d", memory.name(), rank);
+            return csprintf("%s_r%d", memory.name(), rank);
         }
 
         /**
