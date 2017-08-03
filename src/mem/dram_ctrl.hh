@@ -396,6 +396,8 @@ class DRAMCtrl : public AbstractMemory
       public:
         // Make this public so that DRAMCtrl can directly update.
         Stats::Vector bytesAccessed;
+        Stats::Scalar totalBytesAccessed;
+        Stats::Formula devBW;
 
         /**
          * Current power state.
@@ -1505,6 +1507,8 @@ class DRAMCtrl : public AbstractMemory
 
     Tick prevArrival;
 
+    Tick prevVirtualArrival;
+
     /**
      * The soonest you have to start thinking about the next request
      * is the longest access time that can occur before
@@ -1531,6 +1535,9 @@ class DRAMCtrl : public AbstractMemory
     // All statistics that the model needs to capture
     Stats::Scalar readReqs;
     Stats::Scalar writeReqs;
+    Stats::Scalar pushReqs;
+    Stats::Scalar packRdReqs;
+    Stats::Scalar packWrReqs;
     Stats::Scalar readBursts;
     Stats::Scalar writeBursts;
     Stats::Scalar bytesReadDRAM;
@@ -1541,11 +1548,13 @@ class DRAMCtrl : public AbstractMemory
     Stats::Scalar servicedByWrQ;
     Stats::Scalar mergedWrBursts;
     Stats::Scalar neitherReadNorWrite;
+    Stats::Vector perCoreReqs;
     Stats::Vector perBankRdBursts;
     Stats::Vector perBankWrBursts;
     Stats::Scalar numRdRetry;
     Stats::Scalar numWrRetry;
     Stats::Scalar totGap;
+    Stats::Scalar totVirtGap;
     Stats::Vector readPktSize;
     Stats::Vector writePktSize;
     Stats::Vector rdQLenPdf;
@@ -1555,6 +1564,8 @@ class DRAMCtrl : public AbstractMemory
     Stats::Histogram wrPerTurnAround;
     // weil0ng: record packing efficiency.
     Stats::Histogram pckLength;
+    Stats::Vector2d devRdQLenPdf;
+    Stats::Vector2d devWrQLenPdf;
 
     // Latencies summed over all requests
     Stats::Scalar totQLat;
@@ -1587,6 +1598,10 @@ class DRAMCtrl : public AbstractMemory
     // weil0ng: stats for short reqs per dev.
     Stats::AverageVector avgDevRdQLen;
     Stats::AverageVector avgDevWrQLen;
+    Stats::Scalar rdRetry;
+    Stats::Scalar wrRetry;
+    Stats::Formula totalRetry;
+    Stats::Scalar dispatchFail;
 
     // Row hit count and rate
     Stats::Scalar readRowHits;
@@ -1594,6 +1609,7 @@ class DRAMCtrl : public AbstractMemory
     Stats::Formula readRowHitRate;
     Stats::Formula writeRowHitRate;
     Stats::Formula avgGap;
+    Stats::Formula avgVirtGap;
 
     // DRAM Power Calculation
     Stats::Formula pageHitRate;

@@ -103,7 +103,7 @@ DRAMCtrl::DRAMCtrl(const DRAMCtrlParams* p) :
     maxAccessesPerRow(p->max_accesses_per_row),
     frontendLatency(p->static_frontend_latency),
     backendLatency(p->static_backend_latency),
-    busBusyUntil(0), prevArrival(0),
+    busBusyUntil(0), prevArrival(0), prevVirtualArrival(0),
     nextReqTime(0), packWaitTime(p->pack_latency),
     packThres(devicesPerRank * p->pack_threshold / 100.0),
     nextPackTime(0), // weil0ng: init packing params
@@ -753,6 +753,7 @@ DRAMCtrl::addToDevReadQueue(PacketPtr pkt, uint8_t device, unsigned short_pkt_co
             
         assert(devRdQ[device].size() < vmcReadBufferSize);
         DPRINTF(VMC, "Adding to dev read queue %d\n", device);
+        ++devRdQLenPdf[device][devRdQ[device].size()];
         devRdQ[device].push_back(dram_pkt);
         ++dram_pkt->deviceRef.readEntries;
         avgDevRdQLen[device] = devRdQ[device].size();
@@ -801,7 +802,7 @@ DRAMCtrl::addToDevWriteQueue(PacketPtr pkt, uint8_t device, unsigned short_pkt_c
             assert(devWrQ[device].size() < vmcWriteBufferSize);
 
             DPRINTF(VMC, "Adding to dev write queue %d\n", device);
-
+            ++devWrQLenPdf[device][devWrQ[device].size()];
             devWrQ[device].push_back(dram_pkt);
             isInDevWrQ[device].insert(devBurstAlign(addr));
             assert(devWrQ[device].size() == isInDevWrQ[device].size());
@@ -1001,6 +1002,7 @@ DRAMCtrl::recvTimingReq(PacketPtr pkt)
 {
     // This is where we enter from the outside world
     DPRINTF(MemCtx, "from %d\n", pkt->req->contextId());
+    ++perCoreReqs[pkt->req->contextId()];
     DPRINTF(DRAM, "recvTimingReq: request %s addr %#08x size %d\n",
             pkt->cmdString(), pkt->getAddr(), pkt->getSize());
     if (system()->isVMCMode()) {
@@ -1047,7 +1049,7 @@ DRAMCtrl::recvTimingReq(PacketPtr pkt)
         if (devReadQueueFull(first_device, short_pkt_count)) {
             DPRINTF(VMC, "Device read queue full, not accepting\n");
             retryRdReq = true;
-            numRdRetry++;
+            ++rdRetry;
             return false;
         } else {
             addToDevReadQueue(pkt, first_device, short_pkt_count);
@@ -1059,7 +1061,7 @@ DRAMCtrl::recvTimingReq(PacketPtr pkt)
         if (devWriteQueueFull(first_device, short_pkt_count)) {
             DPRINTF(VMC, "Device write queue full, not accepting\n");
             retryWrReq = true;
-            numWrRetry++;
+            ++wrRetry;
             return false;
         } else {
             addToDevWriteQueue(pkt, first_device, short_pkt_count);
@@ -1147,6 +1149,10 @@ DRAMCtrl::dispatchVirtualPkt(DRAMPacket* pushPkt, DRAMPacket* packPkt) {
         totGap += curTick() - prevArrival;
     }
     prevArrival = curTick();
+    if (prevVirtualArrival != 0) {
+        totVirtGap += curTick() - prevVirtualArrival;
+    }
+    prevVirtualArrival = curTick();
 
     // Virtual pkt always translate to exactly 1 dram pkt.
     // There are 3 types of virtual pkts:
@@ -1175,12 +1181,14 @@ DRAMCtrl::dispatchVirtualPkt(DRAMPacket* pushPkt, DRAMPacket* packPkt) {
             //assert(writeQueue.size() == isInWriteQueue.size());
             avgWrQLen = writeQueue.size();
             ++pushPkt->rankRef.writeEntries;
+            ++pushReqs;
 
             DPRINTF(VMC, "Dispatching packRead (%d) to rank %d\n", packPkt->id, rank);
             rdQLenPdf[readQueue.size() + respQueue.size()]++;
             readQueue.push_back(packPkt);
             avgRdQLen = readQueue.size() + respQueue.size();
             ++packPkt->rankRef.readEntries;
+            ++packRdReqs;
 
             dispatched = true;
         } 
@@ -1197,6 +1205,7 @@ DRAMCtrl::dispatchVirtualPkt(DRAMPacket* pushPkt, DRAMPacket* packPkt) {
             //assert(writeQueue.size() == isInWriteQueue.size());
             avgWrQLen = writeQueue.size();
             ++pushPkt->rankRef.writeEntries;
+            ++pushReqs;
 
             DPRINTF(VMC, "Dispatching packWrite (%d) to rank %d\n", packPkt->id, rank);
             assert(writeQueue.size() < writeBufferSize);
@@ -1206,6 +1215,7 @@ DRAMCtrl::dispatchVirtualPkt(DRAMPacket* pushPkt, DRAMPacket* packPkt) {
             //assert(writeQueue.size() == isInWriteQueue.size());
             avgWrQLen = writeQueue.size();
             ++packPkt->rankRef.writeEntries;
+            ++packWrReqs;
 
             dispatched = true;
         }
@@ -1226,6 +1236,7 @@ DRAMCtrl::dispatchVirtualPkt(DRAMPacket* pushPkt, DRAMPacket* packPkt) {
         delete packPkt->pkt;
         delete packPkt->vmcHelper;
         delete packPkt;
+        ++dispatchFail;
     }
     return dispatched;
 }
@@ -2436,6 +2447,7 @@ DRAMCtrl::doMultiBankAccess(DRAMPacket* dram_pkt, Tick busBusyUntil) {
         got_row_hit |= row_hit;
 
         device.bytesAccessed[bank.bank] += burstSize / devicesPerRank;
+        device.totalBytesAccessed += burstSize / devicesPerRank;
     }
 
     // Update bus state
@@ -4323,6 +4335,17 @@ DRAMCtrl::Device::regStats()
         .name(name() + ".bytesAccessed")
         .desc("Bytes accessed during VMC mode per bank")
         .init(memory.banksPerRank);
+
+    totalBytesAccessed
+        .name(name() + ".totalBytesAccessed")
+        .desc("Total bytes accessed during VMC mode per dev");
+    
+    devBW
+        .name(name() + ".devBW")
+        .desc("BW for the device during VMC mode in MB")
+        .precision(2);
+
+    devBW = (totalBytesAccessed / (1024*1024)) / simSeconds;
 }
 
 void
@@ -4346,6 +4369,23 @@ DRAMCtrl::regStats()
     writeReqs
         .name(name() + ".writeReqs")
         .desc("Number of write requests accepted");
+
+    pushReqs
+        .name(name() + ".pushReqs")
+        .desc("Number of push requests dispatched");
+
+    packRdReqs
+        .name(name() + ".packRdReqs")
+        .desc("Number of packRd requests dispatched");
+
+    packWrReqs
+        .name(name() + ".packWrReqs")
+        .desc("Number of packWr requests dispatched");
+
+    perCoreReqs
+        .name(name() + ".perCoreReqs")
+        .desc("Number of reqs per core received by memctrl")
+        .init(system()->numContexts());
 
     readBursts
         .name(name() + ".readBursts")
@@ -4399,6 +4439,25 @@ DRAMCtrl::regStats()
         .init(devicesPerRank * ranksPerChannel)
         .name(name() + ".avgDevWrQLen")
         .desc("Average write queue length for each device when enqueuing");
+
+    rdRetry
+        .name(name() + ".rdRetry")
+        .desc("Total number of read retry due to read queue full in VMC mode");
+
+    wrRetry
+        .name(name() + ".wrRetry")
+        .desc("Total number of write retry due to write queue full in VMC mode");
+
+    totalRetry
+        .name(name() + ".totalRetry")
+        .desc("Total number of retry due to queue full in VMC mode")
+        .precision(2);
+
+    totalRetry = rdRetry + wrRetry;
+
+    dispatchFail
+        .name(name() + ".numDispatchFail")
+        .desc("Times of dispatch failure due to queue full");
 
     totQLat
         .name(name() + ".totQLat")
@@ -4484,6 +4543,16 @@ DRAMCtrl::regStats()
         .name(name() + ".wrQLenPdf")
         .desc("What write queue length does an incoming req see");
 
+     devRdQLenPdf
+         .init(ranksPerChannel * devicesPerRank, vmcReadBufferSize)
+         .name(name() + ".devRdQLenPdf")
+         .desc("What dev read queue length does an incoming req see");
+
+     devWrQLenPdf
+         .init(ranksPerChannel * devicesPerRank, vmcWriteBufferSize)
+         .name(name() + ".devWrQLenPdf")
+         .desc("What dev write queue length does an incoming req see");
+
      bytesPerActivate
          .init(maxAccessesPerRow)
          .name(name() + ".bytesPerActivate")
@@ -4533,35 +4602,35 @@ DRAMCtrl::regStats()
         .desc("Average DRAM read bandwidth in MiByte/s")
         .precision(2);
 
-    avgRdBW = (bytesReadDRAM / 1000000) / simSeconds;
+    avgRdBW = (bytesReadDRAM / (1024*1024)) / simSeconds;
 
     avgWrBW
         .name(name() + ".avgWrBW")
         .desc("Average achieved write bandwidth in MiByte/s")
         .precision(2);
 
-    avgWrBW = (bytesWritten / 1000000) / simSeconds;
+    avgWrBW = (bytesWritten / (1024*1024)) / simSeconds;
 
     avgRdBWSys
         .name(name() + ".avgRdBWSys")
         .desc("Average system read bandwidth in MiByte/s")
         .precision(2);
 
-    avgRdBWSys = (bytesReadSys / 1000000) / simSeconds;
+    avgRdBWSys = (bytesReadSys / (1024*1024)) / simSeconds;
 
     avgWrBWSys
         .name(name() + ".avgWrBWSys")
         .desc("Average system write bandwidth in MiByte/s")
         .precision(2);
 
-    avgWrBWSys = (bytesWrittenSys / 1000000) / simSeconds;
+    avgWrBWSys = (bytesWrittenSys / (1024*1024)) / simSeconds;
 
     peakBW
         .name(name() + ".peakBW")
         .desc("Theoretical peak bandwidth in MiByte/s")
         .precision(2);
 
-    peakBW = (SimClock::Frequency / tBURST) * burstSize / 1000000;
+    peakBW = (SimClock::Frequency / tBURST) * burstSize / (1024*1024);
 
     busUtil
         .name(name() + ".busUtil")
@@ -4573,12 +4642,23 @@ DRAMCtrl::regStats()
         .name(name() + ".totGap")
         .desc("Total gap between requests");
 
+    totVirtGap
+        .name(name() + ".totVirtGap")
+        .desc("Total gap between virtual requests");
+
     avgGap
         .name(name() + ".avgGap")
         .desc("Average gap between requests")
         .precision(2);
 
     avgGap = totGap / (readReqs + writeReqs);
+
+    avgVirtGap
+        .name(name() + ".avgVirtGap")
+        .desc("Average gap between virtual requests")
+        .precision(2);
+
+    avgVirtGap = totVirtGap / (packRdReqs + packWrReqs);
 
     // Stats for DRAM Power calculation based on Micron datasheet
     busUtilRead
