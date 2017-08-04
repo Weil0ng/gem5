@@ -989,10 +989,12 @@ bool
 DRAMCtrl::recvTimingReq(PacketPtr pkt)
 {
     // This is where we enter from the outside world
-    DPRINTF(MemCtx, "from %d\n", pkt->req->contextId());
-    ++perCoreReqs[pkt->req->contextId()];
     DPRINTF(DRAM, "recvTimingReq: request %s addr %#08x size %d\n",
             pkt->cmdString(), pkt->getAddr(), pkt->getSize());
+    if (pkt->req->hasContextId()) {
+        DPRINTF(MemCtx, "from %d\n", pkt->req->contextId());
+        ++perCoreReqs[pkt->req->contextId()];
+    }
     if (system()->isVMCMode()) {
         if (!isVMCMode) {
             assert(drain() == DrainState::Drained);
@@ -1002,9 +1004,15 @@ DRAMCtrl::recvTimingReq(PacketPtr pkt)
                 splitRankToDevices(i);
         }
         DPRINTF(VMC, "=============%s============\n", curTick());
-        DPRINTF(VMC, "recvTimingReq from %d: request %s addr %#08x size %d vmc %s\n",
-                pkt->req->contextId(), pkt->cmdString(), pkt->getAddr(),
-                pkt->getSize(), system()->isVMCMode());
+        if (pkt->req->hasContextId()) {
+            DPRINTF(VMC, "recvTimingReq from %d: request %s addr %#08x size %d vmc %s\n",
+                    pkt->req->contextId(), pkt->cmdString(), pkt->getAddr(),
+                    pkt->getSize(), isVMCMode);
+        } else {
+            DPRINTF(VMC, "recvTimingReq from cache: request %s addr %#08x size %d vmc %s\n",
+                    pkt->cmdString(), pkt->getAddr(),
+                    pkt->getSize(), isVMCMode);
+        }
     } else {
         if (isVMCMode) {
             DPRINTF(VMC, "Exiting VMC mode\n");
@@ -1558,7 +1566,8 @@ DRAMCtrl::reorderQueue(std::deque<DRAMPacket*>& queue, Tick extra_col_delay)
 void
 DRAMCtrl::accessAndRespond(PacketPtr pkt, Tick static_latency)
 {
-    DPRINTF(MemCtx, "to %d\n", pkt->req->contextId());
+    if (pkt->req->hasContextId())
+        DPRINTF(MemCtx, "to %d\n", pkt->req->contextId());
     DPRINTF(DRAM, "Responding to address %#08x..\n", pkt->getAddr());
 
     bool needsResponse = pkt->needsResponse();
@@ -2730,7 +2739,7 @@ DRAMCtrl::processNextReqEvent()
         writeQueue.pop_front();
 
         // removed write from queue, decrement count
-        if (!dram_pkt->isVirtual || dram_pkt->carryAddr)
+        if (!dram_pkt->isVirtual)
             --dram_pkt->rankRef.writeEntries;
         else {
             for(int i=0; i<dram_pkt->packHelper->pkt_cnt; ++i) {
