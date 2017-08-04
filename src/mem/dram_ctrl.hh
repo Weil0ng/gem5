@@ -295,6 +295,7 @@ class DRAMCtrl : public AbstractMemory
 
     // weil0ng: forward declaration.
     class Rank;
+    class DRAMPacket;
 
     class Device : public EventManager
     {
@@ -615,8 +616,6 @@ class DRAMCtrl : public AbstractMemory
         wakeUpEvent;
     };
 
-    class DRAMPacket;
-
     /**
      * Rank class includes a vector of banks. Refresh and Power state
      * machines are defined per rank. Events required to change the
@@ -873,7 +872,7 @@ class DRAMCtrl : public AbstractMemory
          * internal states, issue a refresh to restart.
          *
          * Should only be called when exiting VMC mode and after
-         * all remaining virtual pkts are dealt with.
+         * all remaining pack pkts are dealt with.
          */
         void collectStatsAndRestart();
 
@@ -965,17 +964,17 @@ class DRAMCtrl : public AbstractMemory
 
     /**
      * weil0ng:
-     * A VMCHelper helps remember which short DRAMPackets 
+     * A PackHelper helps remember which short DRAMPackets 
      * an consolidated DRAMPacket has.
      */
-    class VMCHelper {
+    class PackHelper {
 
         public:
 
           const size_t pkt_cnt;
           std::deque<DRAMPacket*>* pkts;
 
-          VMCHelper(size_t _pkt_cnt, std::deque<DRAMPacket*>* _pkts)
+          PackHelper(size_t _pkt_cnt, std::deque<DRAMPacket*>* _pkts)
               : pkt_cnt(_pkt_cnt), pkts(_pkts)
           { }
 
@@ -990,7 +989,7 @@ class DRAMCtrl : public AbstractMemory
                   delete p;
           }
 
-          ~VMCHelper() {
+          ~PackHelper() {
               delete pkts;
           }
     };
@@ -1062,10 +1061,10 @@ class DRAMCtrl : public AbstractMemory
         Bank& bankRef;
         Rank& rankRef;
 
-        /** weil0ng: a pointer to VMCHelper if this DRAMPacket is a
+        /** weil0ng: a pointer to PackHelper if this DRAMPacket is a
          * consolidated DRAMPacket, otherwise, this is NULL.
          */
-        VMCHelper* vmcHelper;
+        PackHelper* packHelper;
 
         /** weil0ng: id for debug tracking
          */
@@ -1084,7 +1083,7 @@ class DRAMCtrl : public AbstractMemory
               bankId(bank_id), addr(_addr), size(_size),
               burstHelper(NULL), deviceRef(dev_ref),
               bankRef(bank_ref), rankRef(rank_ref),
-              vmcHelper(NULL), preReq(NULL), follower(NULL), id(++sid)
+              packHelper(NULL), id(++sid)
         { }
 
     };
@@ -1233,7 +1232,7 @@ class DRAMCtrl : public AbstractMemory
      * weil0ng: similar as above but for virtual pkts.
      *
      * Each virtual pkt has one or more short pkts, refer to
-     * VMCHelper. We need to traverse them here.
+     * PackHelper. We need to traverse them here.
      */
     void accessAndRespondVirtual(DRAMPacket* pkt, Tick static_latency);
 
@@ -1678,8 +1677,7 @@ class DRAMCtrl : public AbstractMemory
     // and dispatch to the mem_ctrl.
     void tryPackAndDispatch();
     // weil0ng: debug only, print addrRegs.
-    void dPrintAddrRegs(uint8_t rank);
-    void dPrintAddrRegs();
+    void dPrintAddrRegs(uint8_t rank, uint8_t device);
     void dPrintEventCount(uint8_t rank, bool inc, std::string reason);
 };
 
