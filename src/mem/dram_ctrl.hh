@@ -332,7 +332,7 @@ class DRAMCtrl : public AbstractMemory
          * Keep track of when a refresh is due.
          */
         Tick refreshDueAt;
-
+      public: 
         /*
          * Command energies
          */
@@ -371,6 +371,12 @@ class DRAMCtrl : public AbstractMemory
         Stats::Scalar averagePower;
 
         /**
+         * Function to update Power Stats
+         */
+        void updatePowerStats();
+
+      private:
+        /**
          * Stat to track total DRAM idle time
          *
          */
@@ -380,11 +386,6 @@ class DRAMCtrl : public AbstractMemory
          * Track time spent in each power state.
          */
         Stats::Vector pwrStateTime;
-
-        /**
-         * Function to update Power Stats
-         */
-        void updatePowerStats();
 
         /**
          * Schedule a power state transition in the future, and
@@ -709,6 +710,32 @@ class DRAMCtrl : public AbstractMemory
         Stats::Scalar totalEnergy;
         Stats::Scalar averagePower;
 
+        /** weil0ng: accumulate stats from device. */
+        Stats::Vector devActEnergy;
+        Stats::Vector devPreEnergy;
+        Stats::Vector devReadEnergy;
+        Stats::Vector devWriteEnergy;
+        Stats::Vector devRefreshEnergy;
+        Stats::Vector devActBackEnergy;
+        Stats::Vector devPreBackEnergy;
+        Stats::Vector devActPowerDownEnergy;
+        Stats::Vector devPrePowerDownEnergy;
+        Stats::Vector devSelfRefreshEnergy;
+        Stats::Vector devTotalEnergy;
+        Stats::Vector devAveragePower;
+        Stats::Formula accActEnergy;
+        Stats::Formula accPreEnergy;
+        Stats::Formula accReadEnergy;
+        Stats::Formula accWriteEnergy;
+        Stats::Formula accRefreshEnergy;
+        Stats::Formula accActBackEnergy;
+        Stats::Formula accPreBackEnergy;
+        Stats::Formula accActPowerDownEnergy;
+        Stats::Formula accPrePowerDownEnergy;
+        Stats::Formula accSelfRefreshEnergy;
+        Stats::Formula accTotalEnergy;
+        Stats::Formula accAveragePower;
+
         /**
          * Stat to track total DRAM idle time
          *
@@ -886,13 +913,10 @@ class DRAMCtrl : public AbstractMemory
         void flushCmdList();
 
         /** weil0ng:
-         * collect stats from devices of this rank and reset all
-         * internal states, issue a refresh to restart.
-         *
          * Should only be called when exiting VMC mode and after
          * all remaining pack pkts are dealt with.
          */
-        void collectStatsAndRestart();
+        void restart();
 
         /*
          * Function to register Stats

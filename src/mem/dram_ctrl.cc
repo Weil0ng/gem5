@@ -922,10 +922,8 @@ DRAMCtrl::printQs() const {
 }
 
 void
-DRAMCtrl::Rank::collectStatsAndRestart() {
+DRAMCtrl::Rank::restart() {
     // TODO: assertions to check states of devices.
-
-    // Copy over stats.
 
     // Reset internal states.
     for (auto& b : banks) {
@@ -955,7 +953,6 @@ DRAMCtrl::Device::copyStateFromRank() {
     this->pwrStatePostRefresh = rank_ref.pwrStatePostRefresh;
     this->pwrStateTick = rank_ref.pwrStateTick;
     this->refreshDueAt = rank_ref.refreshDueAt;
-    // TODO: copy stats?
     this->pwrState = rank_ref.pwrState;
     this->refreshState = rank_ref.refreshState;
     this->inLowPowerState = rank_ref.inLowPowerState;
@@ -963,9 +960,10 @@ DRAMCtrl::Device::copyStateFromRank() {
     this->writeEntries = rank_ref.writeEntries;
     this->outstandingEvents = rank_ref.outstandingEvents;
     this->wakeUpAllowedAt = rank_ref.wakeUpAllowedAt;
+    // copy over all power stats from rank
     this->power = rank_ref.power;
     this->cmdList = rank_ref.cmdList;
-    this->banks = rank_ref.banks;
+    // this->banks = rank_ref.banks;
     this->numBanksActive = rank_ref.numBanksActive;
     this->actTicks = rank_ref.actTicks;
 }
@@ -981,7 +979,7 @@ DRAMCtrl::splitRankToDevices(uint8_t rank)
 void
 DRAMCtrl::mergeDevicesToRank(uint8_t rank)
 {
-    ranks[rank]->collectStatsAndRestart();
+    ranks[rank]->restart();
 }
 
 // weil0ng: this serves as the on-chip buffer for VMC.
@@ -1670,6 +1668,8 @@ DRAMCtrl::accessAndRespond(PacketPtr pkt, Tick static_latency)
     if (pkt->req->hasContextId())
         DPRINTF(MemCtx, "to %d\n", pkt->req->contextId());
     DPRINTF(DRAM, "Responding to address %#08x..\n", pkt->getAddr());
+    if (isVMCMode)
+        DPRINTF(VMC, "Responding to address %#08x..\n", pkt->getAddr());
 
     bool needsResponse = pkt->needsResponse();
     // do the actual memory access which also turns the packet into a
@@ -4016,6 +4016,7 @@ DRAMCtrl::Device::processPushEvent()
     assert(pendingPushPkt);
     // We must have not pushed the pkt already.
     assert(pendingPushPkt->addrReadyAt == 0);
+    ++memory.pushReqs;
     // When we are here, there gotta be an empty space in addrRegs.
     assert(addrRegs.size() < memory.addrRegsPerDevice);
     // Update stats.
@@ -4045,6 +4046,7 @@ DRAMCtrl::Device::processPushEvent()
 void
 DRAMCtrl::Rank::updatePowerStats()
 {
+    assert(!memory.isVMCMode);
     // All commands up to refresh have completed
     // flush cmdList to DRAMPower
     flushCmdList();
@@ -4085,6 +4087,7 @@ DRAMCtrl::Rank::updatePowerStats()
 void
 DRAMCtrl::Device::updatePowerStats()
 {
+    assert(memory.isVMCMode);
     flushCmdList();
     power.powerlib.updateCounters(false);
     power.powerlib.calcEnergy();
@@ -4092,17 +4095,29 @@ DRAMCtrl::Device::updatePowerStats()
     Data::MemoryPowerModel::Power device_power = power.powerlib.getPower();
 
     actEnergy = energy.act_energy;
+    rank_ref.devActEnergy[device] = energy.act_energy;
     preEnergy = energy.pre_energy;
+    rank_ref.devPreEnergy[device] = energy.pre_energy;
     readEnergy = energy.read_energy;
+    rank_ref.devReadEnergy[device] = energy.read_energy;
     writeEnergy = energy.write_energy;
+    rank_ref.devWriteEnergy[device] = energy.write_energy;
     refreshEnergy = energy.ref_energy;
+    rank_ref.devRefreshEnergy[device] = energy.ref_energy;
     actBackEnergy = energy.act_stdby_energy;
+    rank_ref.devActBackEnergy[device] = energy.act_stdby_energy;
     preBackEnergy = energy.pre_stdby_energy;
+    rank_ref.devPreBackEnergy[device] = energy.pre_stdby_energy;
     actPowerDownEnergy = energy.f_act_pd_energy;
+    rank_ref.devActPowerDownEnergy[device] = energy.f_act_pd_energy;
     prePowerDownEnergy = energy.f_pre_pd_energy;
+    rank_ref.devPrePowerDownEnergy[device] = energy.f_pre_pd_energy;
     selfRefreshEnergy = energy.sref_energy;
+    rank_ref.devSelfRefreshEnergy[device] = energy.sref_energy;
     totalEnergy = energy.total_energy;
+    rank_ref.devTotalEnergy[device] = energy.total_energy;
     averagePower = device_power.average_power;
+    rank_ref.devAveragePower[device] = energy.average_power;
 }
 
 void
@@ -4114,8 +4129,14 @@ DRAMCtrl::Rank::computeStats()
     // current state up to curTick()
     cmdList.push_back(Command(MemCommand::NOP, 0, curTick()));
 
-    // Update the stats
-    updatePowerStats();
+    // Update the stats.
+    if (!memory.isVMCMode) {
+        updatePowerStats();
+    } else {
+        for (auto d : devices) {
+            d->updatePowerStats();
+        }
+    }
 
     // final update of power state times
     pwrStateTime[pwrState] += (curTick() - pwrStateTick);
@@ -4143,49 +4164,193 @@ DRAMCtrl::Rank::regStats()
         .name(name() + ".actEnergy")
         .desc("Energy for activate commands per rank (pJ)");
 
+    devActEnergy
+        .init(memory.devicesPerRank)
+        .name(name() + ".devActEnergy")
+        .desc("Energy for activate per device (pJ)");
+
+    accActEnergy
+        .name(name() + ".accActEnergy")
+        .desc("Energy for activate collected from devices (pJ)")
+        .precision(2);
+
+    accActEnergy = sum(devActEnergy);
+
     preEnergy
         .name(name() + ".preEnergy")
         .desc("Energy for precharge commands per rank (pJ)");
+
+    devPreEnergy
+        .init(memory.devicesPerRank)
+        .name(name() + ".devPreEnergy")
+        .desc("Energy for precharge per device (pJ)");
+
+    accPreEnergy
+        .name(name() + ".accPreEnergy")
+        .desc("Energy for precharge collected from devices (pJ)")
+        .precision(2);
+
+    accPreEnergy = sum(devPreEnergy);
 
     readEnergy
         .name(name() + ".readEnergy")
         .desc("Energy for read commands per rank (pJ)");
 
+    devReadEnergy
+        .init(memory.devicesPerRank)
+        .name(name() + ".devReadEnergy")
+        .desc("Energy for read per device (pJ)");
+
+    accReadEnergy
+        .name(name() + ".accReadEnergy")
+        .desc("Energy for read collected from devices (pJ)")
+        .precision(2);
+
+    accReadEnergy = sum(devReadEnergy);
+
     writeEnergy
         .name(name() + ".writeEnergy")
         .desc("Energy for write commands per rank (pJ)");
+
+    devWriteEnergy
+        .init(memory.devicesPerRank)
+        .name(name() + ".devWriteEnergy")
+        .desc("Energy for write per device (pJ)");
+
+    accWriteEnergy
+        .name(name() + ".accWriteEnergy")
+        .desc("Energy for write collected from devices (pJ)")
+        .precision(2);
+
+    accWriteEnergy = sum(devWriteEnergy);
 
     refreshEnergy
         .name(name() + ".refreshEnergy")
         .desc("Energy for refresh commands per rank (pJ)");
 
+    devRefreshEnergy
+        .init(memory.devicesPerRank)
+        .name(name() + ".devRefreshEnergy")
+        .desc("Energy for refresh per device (pJ)");
+
+    accRefreshEnergy
+        .name(name() + ".accRefreshEnergy")
+        .desc("Energy for refresh collected from devices (pJ)")
+        .precision(2);
+
+    accRefreshEnergy = sum(devRefreshEnergy);
+
     actBackEnergy
         .name(name() + ".actBackEnergy")
         .desc("Energy for active background per rank (pJ)");
+
+    devActBackEnergy
+        .init(memory.devicesPerRank)
+        .name(name() + ".devActBackEnergy")
+        .desc("Energy for active background per device (pJ)");
+
+    accActBackEnergy
+        .name(name() + ".accActBackEnergy")
+        .desc("Energy for active background collected from devices (pJ)")
+        .precision(2);
+
+    accActBackEnergy = sum(devActBackEnergy);
 
     preBackEnergy
         .name(name() + ".preBackEnergy")
         .desc("Energy for precharge background per rank (pJ)");
 
+    devPreBackEnergy
+        .init(memory.devicesPerRank)
+        .name(name() + ".devPreBackEnergy")
+        .desc("Energy for precharge background per device (pJ)");
+
+    accPreBackEnergy
+        .name(name() + ".accPreBackEnergy")
+        .desc("Energy for precharge background collected from devices (pJ)")
+        .precision(2);
+
+    accPreBackEnergy = sum(devPreBackEnergy);
+
     actPowerDownEnergy
         .name(name() + ".actPowerDownEnergy")
         .desc("Energy for active power-down per rank (pJ)");
+
+    devActPowerDownEnergy
+        .init(memory.devicesPerRank)
+        .name(name() + ".devActPowerDownEnergy")
+        .desc("Energy for active power-down per device (pJ)");
+
+    accActPowerDownEnergy
+        .name(name() + ".accActPowerDownEnergy")
+        .desc("Energy for active power-down collected from devices (pJ)")
+        .precision(2);
+
+    accActPowerDownEnergy = sum(devActPowerDownEnergy);
 
     prePowerDownEnergy
         .name(name() + ".prePowerDownEnergy")
         .desc("Energy for precharge power-down per rank (pJ)");
 
+    devPrePowerDownEnergy
+        .init(memory.devicesPerRank)
+        .name(name() + ".devPrePowerDownEnergy")
+        .desc("Energy for precharge power-down per device (pJ)");
+
+    accPrePowerDownEnergy
+        .name(name() + ".accPrePowerDownEnergy")
+        .desc("Energy for precharge power-down collected from devices (pJ)")
+        .precision(2);
+
+    accPrePowerDownEnergy = sum(devPrePowerDownEnergy);
+
     selfRefreshEnergy
         .name(name() + ".selfRefreshEnergy")
         .desc("Energy for self refresh per rank (pJ)");
+
+    devSelfRefreshEnergy
+        .init(memory.devicesPerRank)
+        .name(name() + ".devSelfRefreshEnergy")
+        .desc("Energy for self refresh per device (pJ)");
+
+    accSelfRefreshEnergy
+        .name(name() + ".accSelfRefreshEnergy")
+        .desc("Energy for self refresh collected from devices (pJ)")
+        .precision(2);
+
+    accSelfRefreshEnergy = sum(devSelfRefreshEnergy);
 
     totalEnergy
         .name(name() + ".totalEnergy")
         .desc("Total energy per rank (pJ)");
 
+    devTotalEnergy
+        .init(memory.devicesPerRank)
+        .name(name() + ".devTotalEnergy")
+        .desc("Total energy per device (pJ)");
+
+    accTotalEnergy
+        .name(name() + ".accTotalEnergy")
+        .desc("Total energy collected from devices (pJ)")
+        .precision(2);
+
+    accTotalEnergy = sum(devTotalEnergy);
+
     averagePower
         .name(name() + ".averagePower")
         .desc("Core power per rank (mW)");
+
+    devAveragePower
+        .init(memory.devicesPerRank)
+        .name(name() + ".devAveragePower")
+        .desc("Core power per device (mW)");
+
+    accAveragePower
+        .name(name() + ".accAveragePower")
+        .desc("Core power averaged across devices (mW)")
+        .precision(2);
+
+    accAveragePower = sum(devAveragePower) / memory.devicesPerRank;
 
     totalIdleTime
         .name(name() + ".totalIdleTime")
