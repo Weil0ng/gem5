@@ -299,13 +299,14 @@ class DRAMCtrl : public AbstractMemory
 
     class Device : public EventManager
     {
-      private:
+      public:
 
         /**
          * A reference to the parent DRAMCtrl instance
          */
         DRAMCtrl& memory;
 
+      private:
         /**
          * A reference to the hosting Rank instance
          */
@@ -472,6 +473,15 @@ class DRAMCtrl : public AbstractMemory
          */
         std::deque<DRAMPacket*> addrRegs;
 
+        /** weil0ng:
+         * The following two pkts are actual dram_pkts to the device.
+         * Not the pack pkts.
+         */
+        DRAMPacket* pendingClearPkt;
+        DRAMPacket* pendingPushPkt;
+
+        Tick prevPushTick;
+        
         /**
          *  To track number of banks which are currently active for
          *  this rank.
@@ -614,6 +624,14 @@ class DRAMCtrl : public AbstractMemory
         void processWakeUpEvent();
         EventWrapper<Device, &Device::processWakeUpEvent>
         wakeUpEvent;
+
+        void processPushEvent();
+        EventWrapper<Device, &Device::processPushEvent>
+        pushEvent;
+
+        void processClearEvent();
+        EventWrapper<Device, &Device::processClearEvent>
+        clearEvent;
     };
 
     /**
@@ -1010,14 +1028,16 @@ class DRAMCtrl : public AbstractMemory
         /** When will request leave the controller */
         Tick readyTime;
 
+        /** When the address is ready */
+        Tick addrReadyAt;
+
         /** This comes from the outside world */
         const PacketPtr pkt;
 
         const bool isRead;
 
         // weil0ng
-        const bool isVirtual; // Is this a virutal pkt?
-        const bool carryAddr; // Does this virtual pkt carry addr?
+        const bool isPack; // Is this a pack pkt?
 
         /** Will be populated by address decoder */
         const uint8_t rank;
@@ -1070,14 +1090,14 @@ class DRAMCtrl : public AbstractMemory
          */
         int id;
 
-        DRAMPacket(PacketPtr _pkt, bool is_read, bool is_virtual, 
-                   bool carry_addr, uint8_t _rank, uint8_t _bank,
+        DRAMPacket(PacketPtr _pkt, bool is_read, bool is_pack, 
+                   uint8_t _rank, uint8_t _bank,
                    uint32_t _row, uint8_t _device, uint16_t bank_id,
                    Addr _addr, unsigned int _size, Device& dev_ref,
                    Bank& bank_ref, Rank& rank_ref)
-            : entryTime(curTick()), readyTime(curTick()),
+            : entryTime(curTick()), readyTime(curTick()), addrReadyAt(0),
               pkt(_pkt), isRead(is_read),
-              isVirtual(is_virtual), carryAddr(carry_addr),
+              isPack(is_pack),
               rank(_rank), bank(_bank),
               row(_row), device(_device),
               bankId(bank_id), addr(_addr), size(_size),
@@ -1086,10 +1106,31 @@ class DRAMCtrl : public AbstractMemory
               packHelper(NULL), id(++sid)
         { }
 
-    };
+        /* weil0ng:
+         * Check if a pack DRAMPacket is ready to fire.
+         * Check deviced availability and addresses availability.
+         */
+        bool packReady();
 
-    // weil0ng: indicate chooseNext to find PUSH.
-    bool waitingForPush;
+        /* weil0ng:
+         * Check if a pack DRAMPacket can be pushed to addrRegs.
+         */
+        bool canPush();
+
+        /* weil0ng:
+         * Prepare devices for push.
+         */
+        void preparePush();
+
+        void schedulePushEvents(Tick when);
+
+        /* weil0ng:
+         * Prepare device for clear.
+         */
+        void prepareClear();
+
+        void scheduleClearEvents(Tick when);
+    };
 
     /** weil0ng:
      * The following two functions copy states from rank to devices
@@ -1491,7 +1532,7 @@ class DRAMCtrl : public AbstractMemory
 
     Tick prevArrival;
 
-    Tick prevVirtualArrival;
+    Tick prevPackArrival;
 
     /**
      * The soonest you have to start thinking about the next request
@@ -1505,6 +1546,11 @@ class DRAMCtrl : public AbstractMemory
      * The longest wait time between packings.
      */
     Tick packWaitTime;
+
+    /** weil0ng:
+     * The push delay time.
+     */
+    Tick pushDelay;
 
     /** weil0ng:
      * The threshold fraction of packing.
@@ -1538,7 +1584,9 @@ class DRAMCtrl : public AbstractMemory
     Stats::Scalar numRdRetry;
     Stats::Scalar numWrRetry;
     Stats::Scalar totGap;
-    Stats::Scalar totVirtGap;
+    Stats::Scalar totPackGap;
+    Stats::Scalar totPushGap;
+    Stats::Scalar totPushDelay;
     Stats::Vector readPktSize;
     Stats::Vector writePktSize;
     Stats::Vector rdQLenPdf;
@@ -1593,7 +1641,8 @@ class DRAMCtrl : public AbstractMemory
     Stats::Formula readRowHitRate;
     Stats::Formula writeRowHitRate;
     Stats::Formula avgGap;
-    Stats::Formula avgVirtGap;
+    Stats::Formula avgPackGap;
+    Stats::Formula avgPushGap;
 
     // DRAM Power Calculation
     Stats::Formula pageHitRate;
