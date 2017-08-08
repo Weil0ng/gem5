@@ -306,12 +306,12 @@ class DRAMCtrl : public AbstractMemory
          */
         DRAMCtrl& memory;
 
-      private:
         /**
          * A reference to the hosting Rank instance
          */
         Rank& rank_ref;
 
+      private:
         /**
          * Since we are taking decisions out of order, we need to keep
          * track of what power transition is happening at what time
@@ -708,6 +708,10 @@ class DRAMCtrl : public AbstractMemory
         Stats::Scalar selfRefreshEnergy;
 
         Stats::Scalar totalEnergy;
+        Stats::Formula activationEnergy;
+        Stats::Formula dynamicEnergy;
+        Stats::Formula backgroundEnergy;
+
         Stats::Scalar averagePower;
 
         /** weil0ng: accumulate stats from device. */
@@ -723,6 +727,7 @@ class DRAMCtrl : public AbstractMemory
         Stats::Vector devSelfRefreshEnergy;
         Stats::Vector devTotalEnergy;
         Stats::Vector devAveragePower;
+
         Stats::Formula accActEnergy;
         Stats::Formula accPreEnergy;
         Stats::Formula accReadEnergy;
@@ -734,7 +739,27 @@ class DRAMCtrl : public AbstractMemory
         Stats::Formula accPrePowerDownEnergy;
         Stats::Formula accSelfRefreshEnergy;
         Stats::Formula accTotalEnergy;
+        Stats::Formula accActivationEnergy;
+        Stats::Formula accDynamicEnergy;
+        Stats::Formula accBackgroundEnergy;
         Stats::Formula accAveragePower;
+
+        // Cmd stats.
+        Stats::Scalar actCmds;
+        Stats::Scalar preCmds;
+        Stats::Scalar refCmds;
+        Stats::Scalar pdnCmds;
+        Stats::Scalar selfRefCmds;
+        Stats::Vector devActCmds;
+        Stats::Vector devPreCmds;
+        Stats::Vector devRefCmds;
+        Stats::Vector devPdnCmds;
+        Stats::Vector devSelfRefCmds;
+        Stats::Formula avgDevActCmds;
+        Stats::Formula avgDevPreCmds;
+        Stats::Formula avgDevRefCmds;
+        Stats::Formula avgDevPdnCmds;
+        Stats::Formula avgDevSelfRefCmds;
 
         /**
          * Stat to track total DRAM idle time
