@@ -735,21 +735,21 @@ DRAMCtrl::addToDevReadQueue(PacketPtr pkt, uint8_t device, unsigned short_pkt_co
                 DPRINTF(VMC, "Req of size %d turned into %d short pkts\n", size, short_pkt_count);
                 burst_helper = new BurstHelper(short_pkt_count);
             }
-        }
-        DRAMPacket* dram_pkt = decodeAddr(pkt, addr, size, true);
-        DPRINTF(VMC, "Generating dev read pkt (%d)\n", dram_pkt->id);
-        dram_pkt->burstHelper = burst_helper;
+            DRAMPacket* dram_pkt = decodeAddr(pkt, addr, size, true);
+            DPRINTF(VMC, "Generating dev read pkt (%d)\n", dram_pkt->id);
+            dram_pkt->burstHelper = burst_helper;
             
-        assert(devRdQ[device].size() < vmcReadBufferSize);
-        DPRINTF(VMC, "Adding to dev read queue %d\n", device);
-        ++devRdQLenPdf[device][devRdQ[device].size()];
-        devRdQ[device].push_back(dram_pkt);
-        ++dram_pkt->deviceRef.readEntries;
-        avgDevRdQLen[device] = devRdQ[device].size();
-
+            assert(devRdQ[device].size() < vmcReadBufferSize);
+            DPRINTF(VMC, "Adding to dev read queue %d\n", device);
+            ++devRdQLenPdf[device][devRdQ[device].size()];
+            devRdQ[device].push_back(dram_pkt);
+            ++dram_pkt->deviceRef.readEntries;
+            avgDevRdQLen[device] = devRdQ[device].size();
+        }
         addr = (addr | (devBurstSize - 1)) + 1;
         device = (((device - rank_offset) + 1) % devicesPerRank) + rank_offset;
     }
+
     if (pktsServicedByDevWrQ == short_pkt_count) {
         accessAndRespond(pkt, frontendLatency); // weil0ng: TODO is this correct?
         return;
@@ -1290,8 +1290,8 @@ DRAMCtrl::processRespondEvent()
             DRAMPacket* cur_pkt = (*(dram_pkt->packHelper))[i];
 
             --cur_pkt->deviceRef.readEntries;
-            DPRINTF(VMC, "number of read entries for rank%d_device%d is %d\n",
-                    cur_pkt->rank, cur_pkt->device, cur_pkt->deviceRef.readEntries);
+            //DPRINTF(VMC, "number of read entries for rank%d_device%d is %d\n",
+            //       cur_pkt->rank, cur_pkt->device, cur_pkt->deviceRef.readEntries);
             assert(cur_pkt->deviceRef.outstandingEvents > 0);
             --cur_pkt->deviceRef.outstandingEvents;
             assert((cur_pkt->deviceRef.pwrState != PWR_SREF) &&
@@ -1922,8 +1922,8 @@ DRAMCtrl::prechargeBank(Rank& rank_ref, Bank& bank, Tick pre_at, bool trace)
     assert(rank_ref.numBanksActive != 0);
     --rank_ref.numBanksActive;
 
-    DPRINTF(DRAM, "Precharging bank %d, rank %d at tick %lld, now got "
-            "%d active\n", bank.bank, rank_ref.rank, pre_at,
+    DPRINTF(DRAM, "Precharging rank%d_bank%d at tick %lld, now got "
+            "%d active\n", rank_ref.rank, bank.bank, pre_at,
             rank_ref.numBanksActive);
 
     if (trace) {
@@ -1973,8 +1973,9 @@ DRAMCtrl::prechargeBank(Device& device_ref, Bank& bank, Tick pre_at, bool trace)
     assert(device_ref.numBanksActive != 0);
     --device_ref.numBanksActive;
 
-    DPRINTF(VMC, "Precharging bank %d device %d at tick %lld, now got "
-            "%d active\n", bank.bank, device_ref.device, pre_at, device_ref.numBanksActive);
+    DPRINTF(VMC, "Precharging rank%d_device%d_bank%d at tick %lld, now got "
+            "%d active\n", device_ref.rank, device_ref.device, bank.bank,
+            pre_at, device_ref.numBanksActive);
 
     if (trace) {
 
@@ -2416,8 +2417,8 @@ DRAMCtrl::doMultiBankAccess(DRAMPacket* dram_pkt, Tick busBusyUntil) {
         MemCommand::cmds command = (mem_cmd == "RD") ?
             MemCommand::RD : MemCommand::WR;
 
-        DPRINTF(VMC, "Access to %#08x, ready at %lld\n",
-                cur_pkt->addr, cur_pkt->readyTime);
+        DPRINTF(VMC, "Pkt %d accesses %#08x, ready at %lld\n",
+                cur_pkt->id, cur_pkt->addr, cur_pkt->readyTime);
 
         device.cmdList.push_back(Command(command, cur_pkt->bank,
                     cmd_at));
@@ -2733,7 +2734,7 @@ DRAMCtrl::processNextReqEvent()
             respQueue.push_back(dram_pkt);
 
             // weil0ng: before switch to WRITE, check if some pack read has been pushed.
-            bool pushed_reads = false;
+            int pushed_reads = 0;
             for (auto r : ranks) {
                 for (auto d : r->devices) {
                     if (!(d->addrRegs.empty() ||
@@ -2742,10 +2743,15 @@ DRAMCtrl::processNextReqEvent()
                         ++pushed_reads;
                 }
             }
-
             if (pushed_reads > 0) {
+                int pendingReqs = 0;
                 DPRINTF(VMC, "Still has %d pushed reads\n", pushed_reads);
-                assert(pushed_reads <= readQueue.size());
+                for (auto i=writeQueue.begin(); i!=writeQueue.end(); ++i) {
+                    DRAMPacket* cur_pkt = *i;
+                    if (cur_pkt->isPack)
+                        pendingReqs += cur_pkt->packHelper->pkt_cnt;
+                }
+                assert(pushed_reads <= pendingReqs);
             }
 
             // we have so many writes that we have to transition
@@ -2853,10 +2859,16 @@ DRAMCtrl::processNextReqEvent()
                     ++pushed_writes;
             }
         }
-
+        // weil0ng: if there's pushed pkts, check how many short pkts are still pending.
         if (pushed_writes > 0) {
+            int pendingReqs = 0;        
             DPRINTF(VMC, "Still has %d pushed writes\n", pushed_writes);
-            assert(pushed_writes <= writeQueue.size());
+            for (auto i=writeQueue.begin(); i!=writeQueue.end(); ++i) {
+                DRAMPacket* cur_pkt = *i;
+                if (cur_pkt->isPack)
+                    pendingReqs += cur_pkt->packHelper->pkt_cnt;
+            }
+            assert(pushed_writes <= pendingReqs);
         }
 
         // If we emptied the write queue, or got sufficiently below the
@@ -3999,8 +4011,10 @@ DRAMCtrl::Device::processClearEvent()
     addrRegs.erase(std::find(addrRegs.begin(), addrRegs.end(), pendingClearPkt));
     // Delete write pkts since we no longer need it.
     // DESTROY actual write pkt.
-    if (!pendingClearPkt->isRead)
+    if (!pendingClearPkt->isRead) {
+        DPRINTF(Push, "Destroy pkt %d\n", pendingClearPkt->id);
         delete pendingClearPkt;
+    }
     // Reset.
     pendingClearPkt = NULL;
 
