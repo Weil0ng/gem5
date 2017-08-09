@@ -92,6 +92,8 @@ def addNoISAOptions(parser):
     parser.add_option("--mem-size", action="store", type="string",
                       default="512MB",
                       help = "Specify the physical memory size (single memory)")
+    parser.add_option("--use-o3", action="store_true", default=False,
+                      help = "Use O3 core with graph accelerator")
 
     # weil0ng: add cmd knob for page policy.
     parser.add_option("--page-policy", type="choice", default="open_adaptive",

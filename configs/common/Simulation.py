@@ -432,10 +432,6 @@ def run(options, root, testsys, cpu_class):
     if options.fast_forward and options.checkpoint_restore != None:
         fatal("Can't specify both --fast-forward and --checkpoint-restore")
 
-    if options.standard_switch and not options.caches and not options.use_graph_accelerator:
-        #fatal("Must specify --caches when using --standard-switch")
-        pass
-
     if options.standard_switch and options.repeat_switch:
         fatal("Can't specify both --standard-switch and --repeat-switch")
 
@@ -519,8 +515,8 @@ def run(options, root, testsys, cpu_class):
         # weil0ng: temporary hack, to compare against TimingSimple. 
         # Only TimingSimpleCPU can bypass cache entirely
         switch_cpus_1 = ([TimingSimpleCPU(switched_out=True, cpu_id=(i)) for i in xrange(np)]
-                        if not options.use_graph_accelerator
-                        else [TimingSimpleCPU(switched_out=True, cpu_id=(i)) for i in xrange(np)])
+                if not options.use_o3 else
+                [DerivO3CPU(switched_out=True, cpu_id=(i)) for i in xrange(np)])
 
         for i in xrange(np):
             switch_cpus[i].system =  testsys
@@ -529,6 +525,7 @@ def run(options, root, testsys, cpu_class):
             switch_cpus_1[i].workload = testsys.cpu[i].workload
             switch_cpus[i].clk_domain = testsys.cpu[i].clk_domain
             switch_cpus_1[i].clk_domain = testsys.cpu[i].clk_domain
+            switch_cpus_1[i].fetchBufferSize = options.cacheline_size
 
             # if restoring, make atomic cpu simulate only a few instructions
             if options.checkpoint_restore != None:

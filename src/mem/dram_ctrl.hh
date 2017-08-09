@@ -1644,6 +1644,8 @@ class DRAMCtrl : public AbstractMemory
     Stats::Histogram rdPerTurnAround;
     Stats::Histogram wrPerTurnAround;
     // weil0ng: record packing efficiency.
+    Stats::Histogram pckRdLength;
+    Stats::Histogram pckWrLength;
     Stats::Histogram pckLength;
     Stats::Vector2d devRdQLenPdf;
     Stats::Vector2d devWrQLenPdf;

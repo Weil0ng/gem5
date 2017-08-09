@@ -644,6 +644,10 @@ class DDR4_2400_8x8(DDR4_2400_16x4):
     # 8x8 configuration, 8 devices each with an 8-bit interface
     device_bus_width = 8
 
+    # weil0ng: small queues
+    write_buffer_size = 32
+    read_buffer_size = 8
+
     # Each device has a page (row buffer) size of 1 Kbyte (1K columns x8)
     device_rowbuffer_size = '1kB'
 

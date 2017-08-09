@@ -462,6 +462,10 @@ DRAMCtrl::packShortPkts(std::deque<DRAMPacket*> dram_pkts) {
     pckLength.sample(dram_pkts.size());
     uint8_t rank = dram_pkts[0]->rank;
     bool rw = dram_pkts[0]->isRead;
+    if (rw)
+        pckRdLength.sample(dram_pkts.size());
+    else
+        pckWrLength.sample(dram_pkts.size());
     DPRINTF(Pack, "Packing %d %s pkts for rank %d\n", dram_pkts.size(), rw?"read":"write", rank);
     DRAMPacket* packPkt = new DRAMPacket(new Packet(new Request(), MemCmd()), rw, true,
             rank, 0, 0, 0, 0, 0, burstSize/devicesPerRank * dram_pkts.size(), *(ranks[rank]->devices[0]),
@@ -4437,7 +4441,7 @@ DRAMCtrl::Rank::regStats()
         .desc("Core power averaged across devices (mW)")
         .precision(2);
 
-    accAveragePower = sum(devAveragePower / memory.devicesPerRank);
+    accAveragePower = sum(devAveragePower);
 
     actCmds
         .name(name() + ".actCmds")
@@ -4826,6 +4830,18 @@ DRAMCtrl::regStats()
          .init(readBufferSize)
          .name(name() + ".rdPerTurnAround")
          .desc("Reads before turning the bus around for writes")
+         .flags(nozero);
+
+     pckRdLength
+         .init(devicesPerRank)
+         .name(name() + ".pckRdLength")
+         .desc("# of read pkts packed once")
+         .flags(nozero);
+
+     pckWrLength
+         .init(devicesPerRank)
+         .name(name() + ".pckWrLength")
+         .desc("# of write pkts packed once")
          .flags(nozero);
 
      pckLength
