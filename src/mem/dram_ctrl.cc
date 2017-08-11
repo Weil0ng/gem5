@@ -92,8 +92,10 @@ DRAMCtrl::DRAMCtrl(const DRAMCtrlParams* p) :
     writeBufferSize(p->write_buffer_size),
     writeHighThreshold(writeBufferSize * p->write_high_thresh_perc / 100.0),
     writeLowThreshold(writeBufferSize * p->write_low_thresh_perc / 100.0),
+    packWriteHighThreshold(vmcWriteBufferSize * p->write_high_thresh_perc / 100.0),
+    packWriteLowThreshold(vmcWriteBufferSize * p->write_low_thresh_perc / 100.0),
     minWritesPerSwitch(p->min_writes_per_switch),
-    writesThisTime(0), readsThisTime(0),
+    writesThisTime(0), readsThisTime(0), packRdDrain(false), packWrDrain(false),
     tCK(p->tCK), tWTR(p->tWTR), tRTW(p->tRTW), tCS(p->tCS), tBURST(p->tBURST),
     tCCD_L(p->tCCD_L), tRCD(p->tRCD), tCL(p->tCL), tRP(p->tRP), tRAS(p->tRAS),
     tWR(p->tWR), tRTP(p->tRTP), tRFC(p->tRFC), tREFI(p->tREFI), tRRD(p->tRRD),
@@ -295,8 +297,12 @@ DRAMCtrl::startup()
         busBusyUntil = curTick() + tRP + tRCD + tCL;
     }
 
-    DPRINTF(VMC, "Startup params: timing %s, page policy %s, addrRegs %d, packLatency %d\n",
-            isTimingMode ? "True" : "False", pageMgmt, addrRegsPerDevice, packWaitTime);
+    DPRINTF(VMC, "Startup params: timing %s, page policy %s,"
+            "addrRegs %d, packLatency %d, readBufferSize %d,"
+            "writeBufferSize %d, packReadBufferSize %d, packWriteBufferSize %d\n",
+            isTimingMode ? "True" : "False", pageMgmt, addrRegsPerDevice,
+            packWaitTime, readBufferSize, writeBufferSize,
+            vmcReadBufferSize, vmcWriteBufferSize);
 }
 
 Tick
@@ -719,6 +725,7 @@ DRAMCtrl::addToDevReadQueue(PacketPtr pkt, uint8_t device, unsigned short_pkt_co
         unsigned size = std::min((addr | (devBurstSize - 1)) + 1,
                                 pkt->getAddr() + pkt->getSize()) - addr;
         DPRINTF(Pack, "Short pkt of size %d at device %d\n", size, device);
+        ++devReadBursts;
         bool foundInDevWrQ = false;
         Addr dev_burst_addr = devBurstAlign(addr);
         if (isInDevWrQ[device].find(dev_burst_addr) != isInDevWrQ[device].end()) {
@@ -726,6 +733,7 @@ DRAMCtrl::addToDevReadQueue(PacketPtr pkt, uint8_t device, unsigned short_pkt_co
                 if (p->addr <= addr && (addr + size) <= (p->addr + p->size)) {
                     foundInDevWrQ = true;
                     ++pktsServicedByDevWrQ;
+                    ++servicedByDevWrQ;
                     DPRINTF(VMC, "Short pkt to addr %#08x with size %d serviced by wrq\n",
                             addr, size);
                     break;
@@ -764,7 +772,7 @@ DRAMCtrl::addToDevReadQueue(PacketPtr pkt, uint8_t device, unsigned short_pkt_co
     
     // weil0ng: TODO design knob. What machenism we should use?
     if (!packEvent.scheduled()) {
-        DPRINTF(VMC, "Schedule pack event now\n");
+        DPRINTF(Pack, "Schedule pack event now\n");
         if (curTick() > nextPackTime || shouldStartPackNow(rank, pkt->isRead())) {
             nextPackTime = curTick() + packWaitTime;
             schedule(packEvent, curTick());
@@ -812,7 +820,7 @@ DRAMCtrl::addToDevWriteQueue(PacketPtr pkt, uint8_t device, unsigned short_pkt_c
 
     // weil0ng: TODO design knob. What machenism we should use?
     if (!packEvent.scheduled()) {
-        DPRINTF(VMC, "Schedule pack event now\n");
+        DPRINTF(Pack, "Schedule pack event now\n");
         if (curTick() > nextPackTime || shouldStartPackNow(rank, pkt->isRead())) {
             nextPackTime = curTick() + packWaitTime;
             schedule(packEvent, curTick());
@@ -878,8 +886,7 @@ DRAMCtrl::tryPackAndDispatch() {
                     }
                 }
             }
-        } else
-            DPRINTF(Pack, "No dispatch from devRdQ to rank %d\n", rank);
+        }
     }
     
     printDevWriteQueueStatus();
@@ -1000,8 +1007,11 @@ DRAMCtrl::recvTimingReq(PacketPtr pkt)
     if (system()->isVMCMode()) {
         if (!isVMCMode) {
             assert(drain() == DrainState::Drained);
-            DPRINTF(VMC, "Enter VMC mode\n");
             isVMCMode = true;
+            readBufferSize = 2;
+            writeBufferSize = 2;
+            DPRINTF(VMC, "Enter VMC mode, setting read/write buffer size to: %d/%d\n",
+                    readBufferSize, writeBufferSize);
             for (int i=0; i<ranksPerChannel; ++i)
                 splitRankToDevices(i);
         }
@@ -1042,7 +1052,7 @@ DRAMCtrl::recvTimingReq(PacketPtr pkt)
     unsigned offset = pkt->getAddr() & (devBurstSize - 1);
     unsigned short_pkt_count = divCeil(offset + size, devBurstSize);
     DRAMPacket* tmp_pkt = decodeAddr(pkt, addr, size, pkt->isRead());
-    DPRINTF(VMC, "Generating temp pkt (%d) for rank %d\n", tmp_pkt->id, tmp_pkt->rank);
+    // DPRINTF(VMC, "Generating temp pkt (%d) for rank %d\n", tmp_pkt->id, tmp_pkt->rank);
     uint8_t first_device = tmp_pkt->device + devicesPerRank * tmp_pkt->rank;
     delete tmp_pkt;
     if (pkt->isRead()) {
@@ -1134,6 +1144,7 @@ DRAMCtrl::dispatchPackPkt(DRAMPacket* packPkt) {
     if (packPkt->isRead) {
         if (readQueueFull(1)) {
             DPRINTF(Pack, "Fail to dispatch packRead (%d) because read queue full\n", packPkt->id);
+            ++rdDispatchFail;
         } else {
             DPRINTF(Pack, "Dispatching packRead (%d) to rank %d\n", packPkt->id, rank);
             rdQLenPdf[readQueue.size() + respQueue.size()]++;
@@ -1142,10 +1153,15 @@ DRAMCtrl::dispatchPackPkt(DRAMPacket* packPkt) {
             ++packPkt->rankRef.readEntries;
             ++packRdReqs;
             dispatched = true;
+            for (int i=0; i<packPkt->packHelper->pkt_cnt; ++i) {
+                DRAMPacket* cur_pkt = (*(packPkt->packHelper))[i];
+                totDevQLat += (curTick() - cur_pkt->entryTime);
+            }
         } 
     } else {
         if (writeQueueFull(1)) {
             DPRINTF(Pack, "Fail to dispatch packWrite (%d) because write queue full\n", packPkt->id);
+            ++wrDispatchFail;
         } else {
             DPRINTF(Pack, "Dispatching packWrite (%d) to rank %d\n", packPkt->id, rank);
             assert(writeQueue.size() < writeBufferSize);
@@ -1170,7 +1186,6 @@ DRAMCtrl::dispatchPackPkt(DRAMPacket* packPkt) {
         delete packPkt->pkt;
         delete packPkt->packHelper;
         delete packPkt;
-        ++dispatchFail;
     }
     return dispatched;
 }
@@ -1354,6 +1369,19 @@ DRAMCtrl::processRespondEvent()
 
     assert(respQueue.front() != NULL);
     respQueue.pop_front();
+
+    if (isVMCMode && !packEvent.scheduled()) {
+        if (curTick() > nextPackTime) {
+            DPRINTF(Pack, "Schedule pack event now\n");
+            schedule(packEvent, curTick());
+            nextPackTime = curTick() + packWaitTime;
+        } else {
+            schedule(packEvent, nextPackTime);
+            DPRINTF(Pack, "Schedule pack event at %lld (%ld)\n",
+                    nextPackTime, nextPackTime - curTick());
+        }
+    }
+
     if (dram_pkt->isPack) {
         delete dram_pkt->pkt->req;
         delete dram_pkt->pkt;
@@ -1373,7 +1401,7 @@ DRAMCtrl::processRespondEvent()
             signalDrainDone();
         }
     }
-
+   
     // We have made a location in the queue available at this point,
     // so if there is a read that was forced to wait, retry now
     if (retryRdReq) {
@@ -1416,6 +1444,8 @@ DRAMCtrl::DRAMPacket::canPush() {
     // Check bubble on bus.
     avail &= (curTick() + memory.pushDelay <= memory.busBusyUntil - memory.tBURST ||
             curTick() >= memory.busBusyUntil);
+    // Check if we are draining pushed reqs.
+    avail &= ((this->isRead && !memory.packRdDrain) || (!this->isRead && !memory.packWrDrain));
     return avail;
 }
 
@@ -1472,10 +1502,15 @@ DRAMCtrl::chooseNext(std::deque<DRAMPacket*>& queue,
     // packet is simply moved to the head of the queue. The other
     // methods know that this is the place to look. For example, with
     // FCFS, this method does nothing
-    assert(!queue.empty());
-    
-    if (isVMCMode)
-        DPRINTF(VMC, "ChooseNext from %s queue\n", (*(queue.begin()))->isRead?"read":"write");
+    // assert(!queue.empty());
+    // weil0ng: if we are draining reads, there's a chance that the queue is empty.
+    if (!packRdDrain && !packWrDrain)
+        assert(!queue.empty());
+    else {
+        DPRINTF(VMC, "pack reqs draining\n");
+        if (queue.empty())
+            return false;
+    }
     
     int found_id = -1;
 
@@ -2640,20 +2675,55 @@ DRAMCtrl::processNextReqEvent()
         // update busState to match next state until next transition
         busState = busStateNext;
     }
+
+    // weil0ng: sanity check bus state
+    if (packRdDrain)
+        assert(busState == READ);
+    if (packWrDrain)
+        assert(busState == WRITE);
+
     // when we get here it is either a read or a write
     if (busState == READ) {
 
         // track if we should switch or not
         bool switch_to_writes = false;
 
-        if (readQueue.empty()) {
+        if (isVMCMode && readQueue.empty()) {
+        // weil0ng: if there's no dispatched read, might be one of:
+        //  1) Waiting for packing
+        //  2) No more devRdPkt waiting
+        //      if so, we check if need to switch to write
+            bool allEmpty = true;
+            for (uint8_t i=0; i<ranksPerChannel * devicesPerRank; ++i)
+                allEmpty &= devRdQ[i].empty();
+            if (allEmpty) {
+                bool someHasWrite = false;
+                bool someHitsThres = false;
+                for (uint8_t i=0; i<ranksPerChannel * devicesPerRank; ++i) {
+                    someHasWrite |= !devWrQ[i].empty();
+                    someHitsThres |= (devWrQ[i].size() > packWriteLowThreshold);
+                }
+                if (someHasWrite && (drainState() == DrainState::Draining || someHitsThres)) {
+                    switch_to_writes = true;
+                } else {
+                    if (drainState() == DrainState::Draining &&
+                            respQueue.empty() && allRanksDrained()) {
+                        signalDrainDone();
+                    }
+                    return;
+                }
+            } else {
+                // weil0ng: wait for packing or responding.
+                assert(packEvent.scheduled() || !respQueue.empty());
+                return;
+            }
+        } else if (readQueue.empty()) {
             // In the case there is no read request to go next,
             // trigger writes if we have passed the low threshold (or
             // if we are draining)
             if (!writeQueue.empty() &&
                 (drainState() == DrainState::Draining ||
                  writeQueue.size() > writeLowThreshold)) {
-
                 switch_to_writes = true;
             } else {
                 // check if we are drained
@@ -2679,6 +2749,8 @@ DRAMCtrl::processNextReqEvent()
             // front of the read queue
             // If we are changing command type, incorporate the minimum
             // bus turnaround delay which will be tCS (different rank) case
+            if (isVMCMode)
+                DPRINTF(VMC, "ChooseNext from read queue\n");
             found_read = chooseNext(readQueue,
                              switched_cmd_type ? tCS : 0);
 
@@ -2741,29 +2813,44 @@ DRAMCtrl::processNextReqEvent()
 
             respQueue.push_back(dram_pkt);
 
+            bool switchCondSatisfied = false;
             // weil0ng: before switch to WRITE, check if some pack read has been pushed.
-            int pushed_reads = 0;
-            for (auto r : ranks) {
-                for (auto d : r->devices) {
-                    if (!(d->addrRegs.empty() ||
-                                (d->addrRegs.size() == 1 &&
-                                 d->clearEvent.scheduled())))
-                        ++pushed_reads;
+            if (isVMCMode) {
+                for (uint8_t i=0; i<ranksPerChannel * devicesPerRank; ++i)
+                    switchCondSatisfied |= (devWrQ[i].size() > packWriteHighThreshold);
+                int pushed_reads = 0;
+                for (auto r : ranks) {
+                    for (auto d : r->devices) {
+                        if (!(d->addrRegs.empty() ||
+                                    (d->addrRegs.size() == 1 &&
+                                     d->clearEvent.scheduled())))
+                            ++pushed_reads;
+                    }
                 }
-            }
-            if (pushed_reads > 0) {
-                int pendingReqs = 0;
-                DPRINTF(VMC, "Still has %d pushed reads\n", pushed_reads);
-                for (auto i=readQueue.begin(); i!=readQueue.end(); ++i) {
-                    DRAMPacket* cur_pkt = *i;
-                    if (cur_pkt->isPack)
-                        pendingReqs += cur_pkt->packHelper->pkt_cnt;
+                if (pushed_reads > 0) {
+                    int pendingReqs = 0;
+                    DPRINTF(Push, "Still has %d pushed reads\n", pushed_reads);
+                    for (auto i=readQueue.begin(); i!=readQueue.end(); ++i) {
+                        DRAMPacket* cur_pkt = *i;
+                        if (cur_pkt->isPack)
+                            pendingReqs += cur_pkt->packHelper->pkt_cnt;
+                    }
+                    assert(pushed_reads <= pendingReqs);
+                    if (switchCondSatisfied) {
+                        DPRINTF(Push, "Start draining packRead pkts\n");
+                        packRdDrain = true;
+                    }
+                } else {
+                    if (packRdDrain)
+                        packRdDrain = false;
                 }
-                assert(pushed_reads <= pendingReqs);
+            } else {
+                assert(!packRdDrain);
+                switchCondSatisfied = writeQueue.size() > writeHighThreshold;
             }
 
             // we have so many writes that we have to transition
-            if (pushed_reads == 0 && writeQueue.size() > writeHighThreshold) {
+            if (!packRdDrain && switchCondSatisfied) {
                 switch_to_writes = true;
             }
         }
@@ -2781,6 +2868,14 @@ DRAMCtrl::processNextReqEvent()
 
         // If we are changing command type, incorporate the minimum
         // bus turnaround delay
+        if (isVMCMode) {
+            if (writeQueue.empty()) {
+            // weil0ng: might need to wait for packing
+                assert(packEvent.scheduled());
+                return;
+            }
+            DPRINTF(VMC, "ChooseNext from write queue\n");
+        }
         found_write = chooseNext(writeQueue,
                                  switched_cmd_type ? std::min(tRTW, tCS) : 0);
 
@@ -2812,6 +2907,18 @@ DRAMCtrl::processNextReqEvent()
         doDRAMAccess(dram_pkt);
 
         writeQueue.pop_front();
+
+        if (isVMCMode && !packEvent.scheduled()) {
+            if (curTick() > nextPackTime) {
+                DPRINTF(Pack, "Schedule pack event now\n");
+                schedule(packEvent, curTick());
+                nextPackTime = curTick() + packWaitTime;
+            } else {
+                schedule(packEvent, nextPackTime);
+                DPRINTF(Pack, "Schedule pack event at %lld (%ld)\n",
+                        nextPackTime, nextPackTime - curTick());
+            }
+        }
 
         // removed write from queue, decrement count
         if (!dram_pkt->isPack)
@@ -2857,36 +2964,58 @@ DRAMCtrl::processNextReqEvent()
 
         isInWriteQueue.erase(burstAlign(dram_pkt->addr));
 
+        bool switchCondSatisfied = false;
         // weil0ng: before switch to READ, check if some pack write has been pushed.
-        int pushed_writes = 0;
-        for (auto r : ranks) {
-            for (auto d : r->devices) {
-                if (!(d->addrRegs.empty() ||
-                            (d->addrRegs.size() == 1 &&
-                             d->clearEvent.scheduled())))
-                    ++pushed_writes;
+        if (isVMCMode) {
+            bool allEmpty = true;
+            bool allBelowThres = (drainState() != DrainState::Draining);
+            bool someHasRead = false;
+            for (uint8_t i=0; i<ranksPerChannel * devicesPerRank; ++i) {
+                allEmpty &= devWrQ[i].empty();
+                allBelowThres &= (devWrQ[i].size() + minWritesPerSwitch < packWriteLowThreshold);
+                someHasRead |= !devRdQ[i].empty();
             }
-        }
-        // weil0ng: if there's pushed pkts, check how many short pkts are still pending.
-        if (pushed_writes > 0) {
-            int pendingReqs = 0;        
-            DPRINTF(VMC, "Still has %d pushed writes\n", pushed_writes);
-            for (auto i=writeQueue.begin(); i!=writeQueue.end(); ++i) {
-                DRAMPacket* cur_pkt = *i;
-                if (cur_pkt->isPack)
-                    pendingReqs += cur_pkt->packHelper->pkt_cnt;
+            someHasRead = someHasRead && (writesThisTime > minWritesPerSwitch);
+            switchCondSatisfied = allEmpty || allBelowThres || someHasRead;
+            int pushed_writes = 0;
+            for (auto r : ranks) {
+                for (auto d : r->devices) {
+                    if (!(d->addrRegs.empty() ||
+                                (d->addrRegs.size() == 1 &&
+                                 d->clearEvent.scheduled())))
+                        ++pushed_writes;
+                }
             }
-            assert(pushed_writes <= pendingReqs);
+            // weil0ng: if there's pushed pkts, check how many short pkts are still pending.
+            if (pushed_writes > 0) {
+                int pendingReqs = 0;        
+                DPRINTF(Push, "Still has %d pushed writes\n", pushed_writes);
+                for (auto i=writeQueue.begin(); i!=writeQueue.end(); ++i) {
+                    DRAMPacket* cur_pkt = *i;
+                    if (cur_pkt->isPack)
+                        pendingReqs += cur_pkt->packHelper->pkt_cnt;
+                }
+                assert(pushed_writes <= pendingReqs);
+                if (switchCondSatisfied) {
+                    DPRINTF(Push, "Start draining packWrite pkts\n");
+                    packWrDrain = true;
+                }
+            } else {
+                if (packWrDrain)
+                    packWrDrain = false;
+            }
+        } else {
+            switchCondSatisfied = (writeQueue.empty() ||
+                    (writeQueue.size() + minWritesPerSwitch < writeLowThreshold &&
+                     drainState() != DrainState::Draining) ||
+                    (!readQueue.empty() && writesThisTime >= minWritesPerSwitch)); 
         }
 
         // If we emptied the write queue, or got sufficiently below the
         // threshold (using the minWritesPerSwitch as the hysteresis) and
         // are not draining, or we have reads waiting and have done enough
         // writes, then switch to reads.
-        if (pushed_writes == 0 && (writeQueue.empty() ||
-                    (writeQueue.size() + minWritesPerSwitch < writeLowThreshold &&
-                     drainState() != DrainState::Draining) ||
-                    (!readQueue.empty() && writesThisTime >= minWritesPerSwitch))) {
+        if (!packWrDrain && switchCondSatisfied) {
             // turn the bus back around for reads again
             busStateNext = READ;
 
@@ -2908,22 +3037,13 @@ DRAMCtrl::processNextReqEvent()
         delete dram_pkt;
     }
 
-    if (isVMCMode && !packEvent.scheduled()) {
-        DPRINTF(Pack, "Schedule pack event now\n");
-        if (curTick() > nextPackTime) {
-            schedule(packEvent, curTick());
-            nextPackTime = curTick() + packWaitTime;
-        } else {
-            schedule(packEvent, nextPackTime);
-        }
-    }
-
     // It is possible that a refresh to another rank kicks things back into
     // action before reaching this point.
     if (!nextReqEvent.scheduled()) {
         if (isVMCMode)
             DPRINTF(VMC, "Next request scheduled at %lld (%ld)\n",
-                    std::max(nextReqTime, curTick()), (long)nextReqTime-(long)curTick());
+                    std::max(nextReqTime, curTick()),
+                    std::max(nextReqTime, curTick()) - std::min(nextReqTime, curTick()));
         schedule(nextReqEvent, std::max(nextReqTime, curTick()));
     }
 
@@ -4649,6 +4769,13 @@ DRAMCtrl::regStats()
         .name(name() + ".packWrReqs")
         .desc("Number of packWr requests dispatched");
 
+    packReqs
+        .name(name() + ".packReqs")
+        .desc("Number of pack requests dispatched")
+        .precision(2);
+
+    packReqs = packRdReqs + packWrReqs;
+
     perCoreReqs
         .name(name() + ".perCoreReqs")
         .desc("Number of reqs per core received by memctrl")
@@ -4659,6 +4786,11 @@ DRAMCtrl::regStats()
         .desc("Number of DRAM read bursts, "
               "including those serviced by the write queue");
 
+    devReadBursts
+        .name(name() + ".devReadBursts")
+        .desc("Number of DRAM read bursts, "
+                "including those serviced by the dev write queue");
+
     writeBursts
         .name(name() + ".writeBursts")
         .desc("Number of DRAM write bursts, "
@@ -4667,6 +4799,10 @@ DRAMCtrl::regStats()
     servicedByWrQ
         .name(name() + ".servicedByWrQ")
         .desc("Number of DRAM read bursts serviced by the write queue");
+
+    servicedByDevWrQ
+        .name(name() + ".servicedByDevWrQ")
+        .desc("Number of DRAM dev read bursts serviced by the dev write queue");
 
     mergedWrBursts
         .name(name() + ".mergedWrBursts")
@@ -4722,13 +4858,28 @@ DRAMCtrl::regStats()
 
     totalRetry = rdRetry + wrRetry;
 
+    rdDispatchFail
+        .name(name() + ".rdDispatchFail")
+        .desc("Times of a read dispatch failure due to read queue full");
+
+    wrDispatchFail
+        .name(name() + ".wrDispatchFail")
+        .desc("Times of a write dispatch failure due to write queue full");
+
     dispatchFail
-        .name(name() + ".numDispatchFail")
-        .desc("Times of dispatch failure due to queue full");
+        .name(name() + ".dispatchFail")
+        .desc("Times of dispatch failure due to queue full")
+        .precision(2);
+
+    dispatchFail = rdDispatchFail + wrDispatchFail;
 
     totQLat
         .name(name() + ".totQLat")
         .desc("Total ticks spent queuing");
+
+    totDevQLat
+        .name(name() + ".totDevQLat")
+        .desc("Total ticks spent queuing in dev queues");
 
     totBusLat
         .name(name() + ".totBusLat")
@@ -4745,6 +4896,13 @@ DRAMCtrl::regStats()
         .precision(2);
 
     avgQLat = totQLat / (readBursts - servicedByWrQ);
+
+    avgDevQLat
+        .name(name() + ".avgDevQLat")
+        .desc("Average queueing delay per pack req")
+        .precision(2);
+
+    avgDevQLat = totDevQLat / (devReadBursts - servicedByDevWrQ);
 
     avgBusLat
         .name(name() + ".avgBusLat")

@@ -1509,17 +1509,22 @@ class DRAMCtrl : public AbstractMemory
     const uint32_t banksPerRank;
     const uint32_t channels;
     uint32_t rowsPerBank;
-    const uint32_t readBufferSize;
+    uint32_t readBufferSize;
     // weil0ng: size for VMC buffer
     const uint32_t vmcReadBufferSize;
     const uint32_t vmcWriteBufferSize;
     const uint32_t addrRegsPerDevice;
-    const uint32_t writeBufferSize;
-    const uint32_t writeHighThreshold;
-    const uint32_t writeLowThreshold;
+    uint32_t writeBufferSize;
+    uint32_t writeHighThreshold;
+    uint32_t writeLowThreshold;
+    uint32_t packWriteHighThreshold;
+    uint32_t packWriteLowThreshold;
     const uint32_t minWritesPerSwitch;
     uint32_t writesThisTime;
     uint32_t readsThisTime;
+    // weil0ng: mark draining pushed reqs
+    bool packRdDrain;
+    bool packWrDrain;
 
     /**
      * Basic memory timing parameters initialized based on parameter
@@ -1617,14 +1622,18 @@ class DRAMCtrl : public AbstractMemory
     Stats::Scalar pushReqs;
     Stats::Scalar packRdReqs;
     Stats::Scalar packWrReqs;
+    Stats::Formula packReqs;
     Stats::Scalar readBursts;
+    Stats::Scalar devReadBursts;
     Stats::Scalar writeBursts;
+    Stats::Scalar devWriteBursts;
     Stats::Scalar bytesReadDRAM;
     Stats::Scalar bytesReadWrQ;
     Stats::Scalar bytesWritten;
     Stats::Scalar bytesReadSys;
     Stats::Scalar bytesWrittenSys;
     Stats::Scalar servicedByWrQ;
+    Stats::Scalar servicedByDevWrQ;
     Stats::Scalar mergedWrBursts;
     Stats::Scalar neitherReadNorWrite;
     Stats::Vector perCoreReqs;
@@ -1652,11 +1661,13 @@ class DRAMCtrl : public AbstractMemory
 
     // Latencies summed over all requests
     Stats::Scalar totQLat;
+    Stats::Scalar totDevQLat;
     Stats::Scalar totMemAccLat;
     Stats::Scalar totBusLat;
 
     // Average latencies per request
     Stats::Formula avgQLat;
+    Stats::Formula avgDevQLat;
     Stats::Formula avgBusLat;
     Stats::Formula avgMemAccLat;
 
@@ -1684,7 +1695,9 @@ class DRAMCtrl : public AbstractMemory
     Stats::Scalar rdRetry;
     Stats::Scalar wrRetry;
     Stats::Formula totalRetry;
-    Stats::Scalar dispatchFail;
+    Stats::Scalar rdDispatchFail;
+    Stats::Scalar wrDispatchFail;
+    Stats::Formula dispatchFail;
 
     // Row hit count and rate
     Stats::Scalar readRowHits;
