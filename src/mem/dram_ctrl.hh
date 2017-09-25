@@ -1086,6 +1086,7 @@ class DRAMCtrl : public AbstractMemory
         const bool isRead;
 
         // weil0ng
+        const bool isMicro; // Is this a micro-access pkt?
         const bool isPack; // Is this a pack pkt?
 
         /** Will be populated by address decoder */
@@ -1139,14 +1140,15 @@ class DRAMCtrl : public AbstractMemory
          */
         int id;
 
-        DRAMPacket(PacketPtr _pkt, bool is_read, bool is_pack, 
+        DRAMPacket(PacketPtr _pkt, bool is_read,
+                   bool is_micro, bool is_pack, 
                    uint8_t _rank, uint8_t _bank,
                    uint32_t _row, uint8_t _device, uint16_t bank_id,
                    Addr _addr, unsigned int _size, Device& dev_ref,
                    Bank& bank_ref, Rank& rank_ref)
             : entryTime(curTick()), readyTime(curTick()), addrReadyAt(0),
               pkt(_pkt), isRead(is_read),
-              isPack(is_pack),
+              isMicro(is_micro), isPack(is_pack),
               rank(_rank), bank(_bank),
               row(_row), device(_device),
               bankId(bank_id), addr(_addr), size(_size),
@@ -1202,13 +1204,6 @@ class DRAMCtrl : public AbstractMemory
     void processRespondEvent();
     EventWrapper<DRAMCtrl, &DRAMCtrl::processRespondEvent> respondEvent;
 
-    /** weil0ng:
-     * We need a new type of event to trigger packAndDispatch
-     * from dev Qs to Read/Write Qs.
-     */
-    void processPackEvent();
-    EventWrapper<DRAMCtrl, &DRAMCtrl::processPackEvent> packEvent;
-
     /**
      * Check if the read queue has room for more entries
      *
@@ -1257,9 +1252,6 @@ class DRAMCtrl : public AbstractMemory
      */
     void addToReadQueue(PacketPtr pkt, unsigned int pktCount);
 
-    // weil0ng:
-    void addToDevReadQueue(PacketPtr pkt, uint8_t device, unsigned shortPktCount);
-
     /**
      * Decode the incoming pkt, create a dram_pkt and push to the
      * back of the write queue. \If the write q length is more than
@@ -1272,13 +1264,6 @@ class DRAMCtrl : public AbstractMemory
      * then pktCount is greater than one.
      */
     void addToWriteQueue(PacketPtr pkt, unsigned int pktCount);
-
-    // weil0ng:
-    void addToDevWriteQueue(PacketPtr pkt, uint8_t device, unsigned shortPktCount);
-
-    // weil0ng: two utility debug print functions.
-    void printDevReadQueueStatus();
-    void printDevWriteQueueStatus();
 
     /**
      * Actually do the DRAM access - figure out the latency it
@@ -1342,9 +1327,21 @@ class DRAMCtrl : public AbstractMemory
                            bool isRead);
 
     /**
-     * weil0ng: pack pkts into a virtual pkt.
+     * weil0ng: return a pack pkt, but does not replace in the queue.
      */
-    DRAMPacket* packShortPkts(std::deque<DRAMPacket*> pkts);
+    DRAMPacket* tryPack(std::deque<DRAMPacket*>& queue, uint8_t rank);
+
+    /**
+     * weil0ng: pack micro pkts into a pack pkt and put it in front.
+     */
+    bool packMicroPkts(std::deque<DRAMPacket*>& queue, uint8_t rank);
+
+    /**
+     * weil0ng: destroy trial pkt.
+     */
+    bool destroyTrialPkt(DRAMPacket* packPkt);
+
+    bool checkPackEqual(DRAMPacket* pkt1, DRAMPacket* pkt2);
 
     /**
      * The memory schduler/arbiter - picks which request needs to
@@ -1446,13 +1443,6 @@ class DRAMCtrl : public AbstractMemory
     std::deque<DRAMPacket*> writeQueue;
 
     /**
-     * weil0ng:
-     * Map from device id to short request queues.
-     */
-    std::map<uint8_t, std::deque<DRAMPacket*>> devRdQ;
-    std::map<uint8_t, std::deque<DRAMPacket*>> devWrQ;
-
-    /**
      * To avoid iterating over the write queue to check for
      * overlapping transactions, maintain a set of burst addresses
      * that are currently queued. Since we merge writes to the same
@@ -1510,19 +1500,15 @@ class DRAMCtrl : public AbstractMemory
     const uint32_t channels;
     uint32_t rowsPerBank;
     uint32_t readBufferSize;
-    // weil0ng: size for VMC buffer
-    const uint32_t vmcReadBufferSize;
-    const uint32_t vmcWriteBufferSize;
+    // weil0ng: size for address regs.
     const uint32_t addrRegsPerDevice;
     uint32_t writeBufferSize;
     uint32_t writeHighThreshold;
     uint32_t writeLowThreshold;
-    uint32_t packWriteHighThreshold;
-    uint32_t packWriteLowThreshold;
     const uint32_t minWritesPerSwitch;
     uint32_t writesThisTime;
     uint32_t readsThisTime;
-    // weil0ng: mark draining pushed reqs
+    // weil0ng: pack draining flags;
     bool packRdDrain;
     bool packWrDrain;
 
@@ -1586,7 +1572,7 @@ class DRAMCtrl : public AbstractMemory
 
     Tick prevArrival;
 
-    Tick prevPackArrival;
+    Tick prevPushScheduled;
 
     /**
      * The soonest you have to start thinking about the next request
@@ -1606,16 +1592,8 @@ class DRAMCtrl : public AbstractMemory
      */
     Tick pushDelay;
 
-    /** weil0ng:
-     * The threshold fraction of packing.
-     */
-    uint32_t packThres;
-
-    /** weil0ng:
-     * The lastest time when we have to do a pack and dispatch.
-     */
-    Tick nextPackTime;
-
+    Tick packRdDrainStartTick;
+    Tick packWrDrainStartTick;
     // All statistics that the model needs to capture
     Stats::Scalar readReqs;
     Stats::Scalar writeReqs;
@@ -1644,6 +1622,7 @@ class DRAMCtrl : public AbstractMemory
     Stats::Scalar totGap;
     Stats::Scalar totPackGap;
     Stats::Scalar totPushGap;
+    Stats::Scalar totPushEventGap;
     Stats::Scalar totPushDelay;
     Stats::Vector readPktSize;
     Stats::Vector writePktSize;
@@ -1656,8 +1635,12 @@ class DRAMCtrl : public AbstractMemory
     Stats::Histogram pckRdLength;
     Stats::Histogram pckWrLength;
     Stats::Histogram pckLength;
-    Stats::Vector2d devRdQLenPdf;
-    Stats::Vector2d devWrQLenPdf;
+    Stats::Scalar totPackRdDrainTime;
+    Stats::Scalar totPackWrDrainTime;
+    Stats::Vector devRdQLen;
+    Stats::Vector devWrQLen;
+    Stats::Formula avgDevRdQLen;
+    Stats::Formula avgDevWrQLen;
 
     // Latencies summed over all requests
     Stats::Scalar totQLat;
@@ -1690,8 +1673,6 @@ class DRAMCtrl : public AbstractMemory
     Stats::Average avgWrQLen;
 
     // weil0ng: stats for short reqs per dev.
-    Stats::AverageVector avgDevRdQLen;
-    Stats::AverageVector avgDevWrQLen;
     Stats::Scalar rdRetry;
     Stats::Scalar wrRetry;
     Stats::Formula totalRetry;
@@ -1780,15 +1761,6 @@ class DRAMCtrl : public AbstractMemory
     // Otherwise, the pkt should first go through a front-end buffer.
     bool recvTimingReq(PacketPtr pkt);
     bool dispatchPkt(PacketPtr pkt);
-    // weil0ng: similar to dispatch pkt, but deals with pack pkts
-    // w/o an actual PacketPtr.
-    bool dispatchPackPkt(DRAMPacket* pkt);
-    // weil0ng: examine the device queues and see if we should start
-    // packig right away.
-    bool shouldStartPackNow(uint8_t rank, bool isRead);
-    // weil0ng: try packing short pkts to generate a virtual dram pkt
-    // and dispatch to the mem_ctrl.
-    void tryPackAndDispatch();
     // weil0ng: debug only, print addrRegs.
     void dPrintAddrRegs(uint8_t rank, uint8_t device);
     void dPrintEventCount(uint8_t rank, bool inc, std::string reason);

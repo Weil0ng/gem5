@@ -80,13 +80,8 @@ class DRAMCtrl(AbstractMemory):
 
     # weil0ng: rank register size.
     addr_regs_per_device = Param.Unsigned(1, "Number of addr regs per rank")
-    # weil0ng: front end buffer sizes.
-    vmc_write_buffer_size = Param.Unsigned(64, "Number of vmc wtq entries")
-    vmc_read_buffer_size = Param.Unsigned(32, "Number of vmc rdq entries")
     # weil0ng: max wait time before packing.
     pack_latency = Param.Latency('8ns', "Time to wait before packing")
-    # weil0ng: thres of packing.
-    pack_threshold = Param.Percent(75, "Threshold for pack")
 
     # threshold in percent for when to forcefully trigger writes and
     # start emptying the write buffer

@@ -72,7 +72,7 @@ DRAMCtrl::DRAMCtrl(const DRAMCtrlParams* p) :
     retryRdReq(false), retryWrReq(false),
     busState(READ), busStateNext(READ),
     nextReqEvent(this), respondEvent(this),
-    packEvent(this), deviceSize(p->device_size),
+    deviceSize(p->device_size),
     deviceBusWidth(p->device_bus_width), burstLength(p->burst_length),
     deviceRowBufferSize(p->device_rowbuffer_size),
     devicesPerRank(p->devices_per_rank),
@@ -86,14 +86,10 @@ DRAMCtrl::DRAMCtrl(const DRAMCtrlParams* p) :
     bankGroupArch(p->bank_groups_per_rank > 0),
     banksPerRank(p->banks_per_rank), channels(p->channels), rowsPerBank(0),
     readBufferSize(p->read_buffer_size),
-    vmcReadBufferSize(p->vmc_read_buffer_size), // weil0ng: init vmc buffers
-    vmcWriteBufferSize(p->vmc_write_buffer_size),
     addrRegsPerDevice(p->addr_regs_per_device),
     writeBufferSize(p->write_buffer_size),
     writeHighThreshold(writeBufferSize * p->write_high_thresh_perc / 100.0),
     writeLowThreshold(writeBufferSize * p->write_low_thresh_perc / 100.0),
-    packWriteHighThreshold(vmcWriteBufferSize * p->write_high_thresh_perc / 100.0),
-    packWriteLowThreshold(vmcWriteBufferSize * p->write_low_thresh_perc / 100.0),
     minWritesPerSwitch(p->min_writes_per_switch),
     writesThisTime(0), readsThisTime(0), packRdDrain(false), packWrDrain(false),
     tCK(p->tCK), tWTR(p->tWTR), tRTW(p->tRTW), tCS(p->tCS), tBURST(p->tBURST),
@@ -105,11 +101,11 @@ DRAMCtrl::DRAMCtrl(const DRAMCtrlParams* p) :
     maxAccessesPerRow(p->max_accesses_per_row),
     frontendLatency(p->static_frontend_latency),
     backendLatency(p->static_backend_latency),
-    busBusyUntil(0), prevArrival(0), prevPackArrival(0),
+    busBusyUntil(0), prevArrival(0), prevPushScheduled(0),
     // weil0ng: It takes 3 cycles (2 cycles for addr trans + 1 dead cycle) to transfer addr.
     nextReqTime(0), packWaitTime(p->pack_latency), pushDelay(p->tBURST/2 + tCK),
-    packThres(devicesPerRank * p->pack_threshold / 100.0),
-    nextPackTime(0), activeRank(0), timeStampOffset(0)
+    packRdDrainStartTick(0), packWrDrainStartTick(0),
+    activeRank(0), timeStampOffset(0)
 {
     // sanity check the ranks since we rely on bit slicing for the
     // address decoding
@@ -274,12 +270,6 @@ DRAMCtrl::startup()
     // weil0ng: set the pageMgmt
     pageMgmt = system()->getPagePolicy();
 
-    for (auto i=0; i<ranksPerChannel * devicesPerRank; ++i) {
-        devRdQ[i] = std::deque<DRAMPacket*>();
-        devWrQ[i] = std::deque<DRAMPacket*>();
-        isInDevWrQ[i] = std::unordered_set<Addr>();
-    }
-
     if (isTimingMode) {
         // timestamp offset should be in clock cycles for DRAMPower
         timeStampOffset = divCeil(curTick(), tCK);
@@ -299,16 +289,15 @@ DRAMCtrl::startup()
 
     DPRINTF(VMC, "Startup params: timing %s, page policy %s,"
             "addrRegs %d, packLatency %d, readBufferSize %d,"
-            "writeBufferSize %d, packReadBufferSize %d, packWriteBufferSize %d\n",
+            "writeBufferSize %d\n",
             isTimingMode ? "True" : "False", pageMgmt, addrRegsPerDevice,
-            packWaitTime, readBufferSize, writeBufferSize,
-            vmcReadBufferSize, vmcWriteBufferSize);
+            packWaitTime, readBufferSize, writeBufferSize);
 }
 
 Tick
 DRAMCtrl::recvAtomic(PacketPtr pkt)
 {
-    DPRINTF(DRAM, "recvAtomic: %s 0x%x\n", pkt->cmdString(), pkt->getAddr());
+    // DPRINTF(DRAM, "recvAtomic: %s 0x%x\n", pkt->cmdString(), pkt->getAddr());
 
     panic_if(pkt->cacheResponding(), "Should not see packets where cache "
              "is responding");
@@ -455,7 +444,7 @@ DRAMCtrl::decodeAddr(PacketPtr pkt, Addr dramPktAddr, unsigned size,
     // ready time set to the current tick, the latter will be updated
     // later
     uint16_t bank_id = banksPerRank * rank + bank;
-    DRAMPacket* new_pkt = new DRAMPacket(pkt, isRead, false,
+    DRAMPacket* new_pkt = new DRAMPacket(pkt, isRead, isVMCMode, false,
             rank, bank, row, device, bank_id, dramPktAddr, size,
             *(ranks[rank]->devices[device]), ranks[rank]->banks[bank],
             *ranks[rank]);
@@ -463,33 +452,118 @@ DRAMCtrl::decodeAddr(PacketPtr pkt, Addr dramPktAddr, unsigned size,
 }
 
 DRAMCtrl::DRAMPacket*
-DRAMCtrl::packShortPkts(std::deque<DRAMPacket*> dram_pkts) {
-    assert(dram_pkts.size() > 0 && dram_pkts.size() <= devicesPerRank);
-    pckLength.sample(dram_pkts.size());
-    uint8_t rank = dram_pkts[0]->rank;
-    bool rw = dram_pkts[0]->isRead;
-    if (rw)
-        pckRdLength.sample(dram_pkts.size());
-    else
-        pckWrLength.sample(dram_pkts.size());
-    DPRINTF(Pack, "Packing %d %s pkts for rank %d\n", dram_pkts.size(), rw?"read":"write", rank);
-    DRAMPacket* packPkt = new DRAMPacket(new Packet(new Request(), MemCmd()), rw, true,
-            rank, 0, 0, 0, 0, 0, burstSize/devicesPerRank * dram_pkts.size(), *(ranks[rank]->devices[0]),
-            ranks[rank]->banks[0], *ranks[rank]);
-    DPRINTF(Pack, "Generating  %s packPkt (%d) for rank %d\n",
-            dram_pkts[0]->isRead?"read":"write", packPkt->id, rank);
+DRAMCtrl::tryPack(std::deque<DRAMPacket*>& queue, uint8_t rank) {
+    assert(isVMCMode);
+    assert(!queue.empty());
+    bool isRead = queue.front()->isRead;
+    bool found_packet = false;
+    std::deque<DRAMPacket*> micro_pkts = std::deque<DRAMPacket*>();
+    bool* occupied = new bool[devicesPerRank]();
+    for (auto i=queue.begin(); i!=queue.end(); ++i) {
+        DRAMPacket* dram_pkt = *i;
+        //DPRINTF(Pack, "Checking pkt (%d) at rank%d_device%d(%d) for rank %d\n",
+        //        dram_pkt->id, dram_pkt->rank, dram_pkt->device,
+        //        occupied[dram_pkt->device], rank);
+        if (dram_pkt->isMicro && !occupied[dram_pkt->device] && dram_pkt->rank == rank) {
+            micro_pkts.push_back(dram_pkt);
+            occupied[dram_pkt->device] = true;
+            found_packet = true;
+        }
+    }
+    delete [] occupied;
+    if (!found_packet)
+        return NULL;
+    
+    DRAMPacket* packPkt = new DRAMPacket(new Packet(new Request(), MemCmd()), isRead, false, true,
+            rank, 0, 0, 0, 0, 0, burstSize/devicesPerRank * micro_pkts.size(),
+            *(ranks[rank]->devices[0]), ranks[rank]->banks[0], *ranks[rank]);
 
     // Prepare the PackHelper.
     std::deque<DRAMPacket*>* pkts = new std::deque<DRAMPacket*>();
-    for (auto i=0; i<dram_pkts.size(); ++i) {
-        pkts->push_back(dram_pkts[i]);
+    for (auto i=0; i<micro_pkts.size(); ++i) {
+        pkts->push_back(micro_pkts[i]);
     }
-    assert(dram_pkts.size() == pkts->size());
-    PackHelper* pack_helper = new PackHelper(dram_pkts.size(), pkts);
+    assert(micro_pkts.size() == pkts->size());
+    PackHelper* pack_helper = new PackHelper(micro_pkts.size(), pkts);
+    packPkt->packHelper = pack_helper;
+    return packPkt;
+}
+
+bool
+DRAMCtrl::packMicroPkts(std::deque<DRAMPacket*>& queue, uint8_t rank) {
+    assert(isVMCMode);
+    assert(!queue.empty());
+    bool isRead = queue.front()->isRead;
+    bool found_packet = false;
+    std::deque<DRAMPacket*> micro_pkts = std::deque<DRAMPacket*>();
+    bool* occupied = new bool[devicesPerRank]();
+    std::stringstream id_stream;
+    for (auto i=queue.begin(); i!=queue.end(); ++i) {
+        DRAMPacket* dram_pkt = *i;
+        //DPRINTF(Pack, "Checking pkt (%d) at rank%d_device%d(%d) for rank %d\n",
+        //        dram_pkt->id, dram_pkt->rank, dram_pkt->device,
+        //        occupied[dram_pkt->device], rank);
+        if (dram_pkt->isMicro && !occupied[dram_pkt->device] && dram_pkt->rank == rank) {
+            queue.erase(i--);
+            micro_pkts.push_back(dram_pkt);
+            occupied[dram_pkt->device] = true;
+            id_stream << "(" << dram_pkt->id << ")" << " ";
+            found_packet = true;
+        }
+    }
+    delete [] occupied;
+    if (!found_packet)
+        return found_packet;
+    
+    DRAMPacket* packPkt = new DRAMPacket(new Packet(new Request(), MemCmd()), isRead, false, true,
+            rank, 0, 0, 0, 0, 0, burstSize/devicesPerRank * micro_pkts.size(),
+            *(ranks[rank]->devices[0]), ranks[rank]->banks[0], *ranks[rank]);
+    DPRINTF(Pack, "Packing %d %s pkts for rank %d\n", micro_pkts.size(), isRead?"read":"write", rank);
+    DPRINTF(Pack, "Generating %s packPkt (%d) for rank %d\n",
+            packPkt->isRead?"read":"write", packPkt->id, rank);
+    DPRINTF(Pack, "packPkt (%d) has %s\n", packPkt->id, id_stream.str());
+
+    // Prepare the PackHelper.
+    std::deque<DRAMPacket*>* pkts = new std::deque<DRAMPacket*>();
+    for (auto i=0; i<micro_pkts.size(); ++i) {
+        pkts->push_back(micro_pkts[i]);
+    }
+    assert(micro_pkts.size() == pkts->size());
+    PackHelper* pack_helper = new PackHelper(micro_pkts.size(), pkts);
     packPkt->packHelper = pack_helper;
     DPRINTF(Pack, "PackHelper of %d pkts, size %d bytes\n", pack_helper->pkt_cnt, sizeof(pack_helper));
+    queue.push_front(packPkt);
 
-    return packPkt;
+    pckLength.sample(micro_pkts.size());
+    if (isRead)
+        pckRdLength.sample(micro_pkts.size());
+    else
+        pckWrLength.sample(micro_pkts.size());
+    return found_packet;
+}
+
+bool
+DRAMCtrl::checkPackEqual(DRAMPacket* pkt1, DRAMPacket* pkt2) {
+    assert(pkt1->packHelper->pkt_cnt == pkt2->packHelper->pkt_cnt);
+    for(int i=0; i<pkt1->packHelper->pkt_cnt; ++i) {
+        DRAMPacket* cur_pkt1 = (*(pkt1->packHelper))[i];
+        DRAMPacket* cur_pkt2 = (*(pkt2->packHelper))[i];
+        assert(cur_pkt1->id == cur_pkt2->id);
+    }
+    return true;
+}
+
+bool
+DRAMCtrl::destroyTrialPkt(DRAMPacket* packPkt) {
+    assert(packPkt);
+    assert(packPkt->isPack);
+    delete packPkt->pkt->req;
+    delete packPkt->pkt;
+    delete packPkt->packHelper;
+    if (packPkt->burstHelper)
+        delete packPkt->burstHelper;
+    delete packPkt;
+    return true;
 }
 
 void
@@ -510,8 +584,9 @@ DRAMCtrl::addToReadQueue(PacketPtr pkt, unsigned int pktCount)
     Addr addr = pkt->getAddr();
     unsigned pktsServicedByWrQ = 0;
     BurstHelper* burst_helper = NULL;
+    uint32_t pktBurstSize = isVMCMode?devBurstSize:burstSize;
     for (int cnt = 0; cnt < pktCount; ++cnt) {
-        unsigned size = std::min((addr | (burstSize - 1)) + 1,
+        unsigned size = std::min((addr | (pktBurstSize - 1)) + 1,
                         pkt->getAddr() + pkt->getSize()) - addr;
         readPktSize[ceilLog2(size)]++;
         readBursts++;
@@ -519,7 +594,7 @@ DRAMCtrl::addToReadQueue(PacketPtr pkt, unsigned int pktCount)
         // First check write buffer to see if the data is already at
         // the controller
         bool foundInWrQ = false;
-        Addr burst_addr = burstAlign(addr);
+        Addr burst_addr = isVMCMode?devBurstAlign(addr):burstAlign(addr);
         // if the burst address is not present then there is no need
         // looking any further
         if (isInWriteQueue.find(burst_addr) != isInWriteQueue.end()) {
@@ -550,6 +625,7 @@ DRAMCtrl::addToReadQueue(PacketPtr pkt, unsigned int pktCount)
             }
 
             DRAMPacket* dram_pkt = decodeAddr(pkt, addr, size, true);
+
             dram_pkt->burstHelper = burst_helper;
 
             assert(!readQueueFull(1));
@@ -559,15 +635,23 @@ DRAMCtrl::addToReadQueue(PacketPtr pkt, unsigned int pktCount)
 
             readQueue.push_back(dram_pkt);
 
-            // increment read entries of the rank
-            ++dram_pkt->rankRef.readEntries;
-
             // Update stats
             avgRdQLen = readQueue.size() + respQueue.size();
+
+            if (isVMCMode) {
+                DPRINTF(VMC, "Generate dev read pkt (%d)\n", dram_pkt->id);
+                uint8_t device = dram_pkt->device;
+                uint8_t rank = dram_pkt->rank;
+                ++devRdQLen[rank * devicesPerRank + device];
+                ++dram_pkt->deviceRef.readEntries;
+            } else {
+                // increment read entries of the rank
+                ++dram_pkt->rankRef.readEntries;
+            }
         }
 
         // Starting address of next dram pkt (aligend to burstSize boundary)
-        addr = (addr | (burstSize - 1)) + 1;
+        addr = (addr | (pktBurstSize - 1)) + 1;
     }
 
     // If all packets are serviced by write queue, we send the repsonse back
@@ -598,36 +682,47 @@ DRAMCtrl::addToWriteQueue(PacketPtr pkt, unsigned int pktCount)
     // if the request size is larger than burst size, the pkt is split into
     // multiple DRAM packets
     Addr addr = pkt->getAddr();
+    uint32_t pktBurstSize = isVMCMode?devBurstSize:burstSize;
     for (int cnt = 0; cnt < pktCount; ++cnt) {
-        unsigned size = std::min((addr | (burstSize - 1)) + 1,
+        unsigned size = std::min((addr | (pktBurstSize - 1)) + 1,
                         pkt->getAddr() + pkt->getSize()) - addr;
         writePktSize[ceilLog2(size)]++;
         writeBursts++;
 
         // see if we can merge with an existing item in the write
         // queue and keep track of whether we have merged or not
-        bool merged = isInWriteQueue.find(burstAlign(addr)) !=
+        Addr alignedAddr = isVMCMode?devBurstAlign(addr):burstAlign(addr);
+        bool merged = isInWriteQueue.find(alignedAddr) !=
             isInWriteQueue.end();
 
         // if the item was not merged we need to create a new write
         // and enqueue it
         if (!merged) {
             DRAMPacket* dram_pkt = decodeAddr(pkt, addr, size, false);
-
+            
             assert(writeQueue.size() < writeBufferSize);
             wrQLenPdf[writeQueue.size()]++;
 
             DPRINTF(DRAM, "Adding to write queue\n");
 
             writeQueue.push_back(dram_pkt);
-            isInWriteQueue.insert(burstAlign(addr));
-            //assert(writeQueue.size() == isInWriteQueue.size());
-
             // Update stats
             avgWrQLen = writeQueue.size();
 
-            // increment write entries of the rank
-            ++dram_pkt->rankRef.writeEntries;
+            if (isVMCMode) {
+                uint8_t device = dram_pkt->device;
+                uint8_t rank = dram_pkt->rank;
+                DPRINTF(VMC, "Generate dev write pkt (%d)\n", dram_pkt->id);
+                ++devWrQLen[rank * devicesPerRank + device];
+                ++dram_pkt->deviceRef.writeEntries;
+            } else {
+                // increment write entries of the rank
+                ++dram_pkt->rankRef.writeEntries;
+            }
+
+            isInWriteQueue.insert(alignedAddr);
+            //assert(writeQueue.size() == isInWriteQueue.size());
+
         } else {
             DPRINTF(DRAM, "Merging write burst with existing queue entry\n");
 
@@ -637,7 +732,7 @@ DRAMCtrl::addToWriteQueue(PacketPtr pkt, unsigned int pktCount)
         }
 
         // Starting address of next dram pkt (aligend to burstSize boundary)
-        addr = (addr | (burstSize - 1)) + 1;
+        addr = (addr | (pktBurstSize - 1)) + 1;
     }
 
     // we do not wait for the writes to be send to the actual memory,
@@ -652,267 +747,6 @@ DRAMCtrl::addToWriteQueue(PacketPtr pkt, unsigned int pktCount)
     if (!nextReqEvent.scheduled()) {
         DPRINTF(DRAM, "Request scheduled immediately\n");
         schedule(nextReqEvent, curTick());
-    }
-}
-
-void
-DRAMCtrl::printDevReadQueueStatus() {
-    DPRINTF(Pack, "DevRdQ limit %d, current status:\n", vmcReadBufferSize);
-    string header_str("");
-    string stat_str("");
-    for (auto i=0; i<devicesPerRank * ranksPerChannel; ++i) {
-        header_str += std::to_string(i);
-        //stat_str += std::to_string(devRdQ[i].size() + devRespQ[i].size());
-        // weil0ng: we probably don't need devRespQ, use the above code if needed.
-        stat_str += std::to_string(devRdQ[i].size());
-        header_str += string("\t");
-        stat_str += string("\t");
-    }
-    DPRINTF(Pack, "%s\n", header_str.c_str());
-    DPRINTF(Pack, "%s\n", stat_str.c_str());
-}
-
-void
-DRAMCtrl::printDevWriteQueueStatus() {
-    DPRINTF(Pack, "DevWrQ limit %d, current status:\n", vmcWriteBufferSize);
-    string header_str("");
-    string stat_str("");
-    for (auto i=0; i<devicesPerRank * ranksPerChannel; ++i) {
-        header_str += std::to_string(i);
-        stat_str += std::to_string(devWrQ[i].size());
-        header_str += string("\t");
-        stat_str += string("\t");
-    }
-    DPRINTF(Pack, "%s\n", header_str.c_str());
-    DPRINTF(Pack, "%s\n", stat_str.c_str());
-}
-
-bool
-DRAMCtrl::devReadQueueFull(uint8_t device, unsigned pkt_count) {
-    uint8_t rank = device / devicesPerRank;
-    uint8_t rank_offset = rank * devicesPerRank;
-    for (auto i=0; i<pkt_count; ++i) {
-        if (devRdQ[device].size() + 1 > vmcReadBufferSize)
-            return true;
-        device = (((device - rank_offset) + 1) % devicesPerRank) + rank_offset;
-    }
-    return false;
-}
-
-bool
-DRAMCtrl::devWriteQueueFull(uint8_t device, unsigned pkt_count) {
-    uint8_t rank = device / devicesPerRank;
-    uint8_t rank_offset = rank * devicesPerRank;
-    for (auto i=0; i<pkt_count; ++i) {
-        if (devWrQ[device].size() + 1 > vmcWriteBufferSize)
-            return true;
-        device = (((device - rank_offset) + 1) % devicesPerRank) + rank_offset;
-    }
-    return false;
-}
-
-void 
-DRAMCtrl::addToDevReadQueue(PacketPtr pkt, uint8_t device, unsigned short_pkt_count) {
-    assert(pkt->isRead());
-
-    Addr addr = pkt->getAddr();
-    uint8_t rank = device / devicesPerRank;
-    uint8_t rank_offset = rank * devicesPerRank;
-    
-    unsigned pktsServicedByDevWrQ = 0;
-    BurstHelper* burst_helper = NULL;
-    for (unsigned cnt=0; cnt<short_pkt_count; ++cnt) {
-        unsigned size = std::min((addr | (devBurstSize - 1)) + 1,
-                                pkt->getAddr() + pkt->getSize()) - addr;
-        DPRINTF(Pack, "Short pkt of size %d at device %d\n", size, device);
-        ++devReadBursts;
-        bool foundInDevWrQ = false;
-        Addr dev_burst_addr = devBurstAlign(addr);
-        if (isInDevWrQ[device].find(dev_burst_addr) != isInDevWrQ[device].end()) {
-            for (const auto& p : devWrQ[device]) {
-                if (p->addr <= addr && (addr + size) <= (p->addr + p->size)) {
-                    foundInDevWrQ = true;
-                    ++pktsServicedByDevWrQ;
-                    ++servicedByDevWrQ;
-                    DPRINTF(VMC, "Short pkt to addr %#08x with size %d serviced by wrq\n",
-                            addr, size);
-                    break;
-                }
-            }
-        }
-
-        // If not found in device write queue...
-        if (!foundInDevWrQ) {
-            if (short_pkt_count > 1 && burst_helper == NULL) {
-                DPRINTF(VMC, "Req of size %d turned into %d short pkts\n", size, short_pkt_count);
-                burst_helper = new BurstHelper(short_pkt_count);
-            }
-            DRAMPacket* dram_pkt = decodeAddr(pkt, addr, size, true);
-            DPRINTF(VMC, "Generating dev read pkt (%d)\n", dram_pkt->id);
-            dram_pkt->burstHelper = burst_helper;
-            
-            assert(devRdQ[device].size() < vmcReadBufferSize);
-            DPRINTF(VMC, "Adding to dev read queue %d\n", device);
-            ++devRdQLenPdf[device][devRdQ[device].size()];
-            devRdQ[device].push_back(dram_pkt);
-            ++dram_pkt->deviceRef.readEntries;
-            avgDevRdQLen[device] = devRdQ[device].size();
-        }
-        addr = (addr | (devBurstSize - 1)) + 1;
-        device = (((device - rank_offset) + 1) % devicesPerRank) + rank_offset;
-    }
-
-    if (pktsServicedByDevWrQ == short_pkt_count) {
-        accessAndRespond(pkt, frontendLatency); // weil0ng: TODO is this correct?
-        return;
-    }
-
-    if (burst_helper != NULL)
-        burst_helper->burstsServiced = pktsServicedByDevWrQ;
-    
-    // weil0ng: TODO design knob. What machenism we should use?
-    if (!packEvent.scheduled()) {
-        DPRINTF(Pack, "Schedule pack event now\n");
-        if (curTick() > nextPackTime || shouldStartPackNow(rank, pkt->isRead())) {
-            nextPackTime = curTick() + packWaitTime;
-            schedule(packEvent, curTick());
-        } else {
-            schedule(packEvent, nextPackTime);
-        }
-    }
-}
-
-void
-DRAMCtrl::addToDevWriteQueue(PacketPtr pkt, uint8_t device, unsigned short_pkt_count) {
-    assert(pkt->isWrite());
-    assert(pkt->req->isUncacheable() || !pkt->needsResponse());
-
-    Addr addr = pkt->getAddr();
-    uint8_t rank = device / devicesPerRank;
-    uint8_t rank_offset = rank * devicesPerRank;
-    for (unsigned cnt=0; cnt<short_pkt_count; ++cnt) {
-        unsigned size = std::min((addr | (devBurstSize - 1)) + 1,
-                                pkt->getAddr() + pkt->getSize()) - addr;
-        DPRINTF(VMC, "Short pkt of size %d at device %d\n", size, device);
-
-        bool merged = isInDevWrQ[device].find(devBurstAlign(addr)) != isInDevWrQ[device].end();
-
-        if (!merged) {
-            DRAMPacket* dram_pkt = decodeAddr(pkt, addr, size, false);
-            DPRINTF(VMC, "Generating dev write pkt (%d)\n", dram_pkt->id);
-            assert(devWrQ[device].size() < vmcWriteBufferSize);
-
-            DPRINTF(VMC, "Adding to dev write queue %d\n", device);
-            ++devWrQLenPdf[device][devWrQ[device].size()];
-            devWrQ[device].push_back(dram_pkt);
-            isInDevWrQ[device].insert(devBurstAlign(addr));
-            assert(devWrQ[device].size() == isInDevWrQ[device].size());
-            ++dram_pkt->deviceRef.writeEntries;
-            avgDevWrQLen[device] = devWrQ[device].size();
-        } else {
-            DPRINTF(VMC, "Merging short write pkt with existing at device %d", device);
-        }
-        addr = (addr | (devBurstSize - 1)) + 1;
-        device = (((device - rank_offset) + 1) % devicesPerRank) + rank_offset;
-    }
-
-    accessAndRespond(pkt, frontendLatency); // weil0ng: is this correct?
-
-    // weil0ng: TODO design knob. What machenism we should use?
-    if (!packEvent.scheduled()) {
-        DPRINTF(Pack, "Schedule pack event now\n");
-        if (curTick() > nextPackTime || shouldStartPackNow(rank, pkt->isRead())) {
-            nextPackTime = curTick() + packWaitTime;
-            schedule(packEvent, curTick());
-        } else {
-            schedule(packEvent, nextPackTime);
-        }
-    }
-
-}
-
-bool
-DRAMCtrl::shouldStartPackNow(uint8_t rank, bool isRead) {
-    uint8_t rank_offset = rank * devicesPerRank;
-    uint32_t pkts = 0;
-    if (isRead) {
-        for (uint8_t dev=0; dev<devicesPerRank; ++dev) {
-            uint8_t device = dev + rank_offset;
-            if (!devRdQ[device].empty())
-                ++ pkts;
-        }
-    } else {
-        for (uint8_t dev=0; dev<devicesPerRank; ++dev) {
-            uint8_t device = dev + rank_offset;
-            if (!devWrQ[device].empty())
-                ++ pkts;
-        }
-    }
-    return pkts > packThres;
-}
-
-/**
- * weil0ng: try packing and dispatching virtual requests here.
- *
- * 1) Try packing from device read queues, do this blindly greedy for now.
- *  1.1 Pick the fronts from all device read queue within the same rank.
- *  1.2 Generate a PUSH.
- *  1.3 Insert PUSH to writeQueue.
- *  1.4 Generate a virtual pkt.
- *  1.5 Insert the virtual pkt to read/writeQueue.
- *
- * 2) Try packing from device write queues, do this blindly greedy for now.
- */
-void
-DRAMCtrl::tryPackAndDispatch() {
-    printDevReadQueueStatus();
-
-    for (uint8_t rank=0; rank<ranksPerChannel; ++rank) {
-        uint8_t rank_offset = rank * devicesPerRank;
-        std::deque<DRAMPacket*> pkts = std::deque<DRAMPacket*>();
-        assert(pkts.empty());
-        for (uint8_t dev=0; dev<devicesPerRank; ++dev) {
-            uint8_t device = dev + rank_offset;
-            if (!devRdQ[device].empty())
-                pkts.push_back(devRdQ[device].front());
-        }
-        if (!pkts.empty()) {
-            bool dispatched = dispatchPackPkt(packShortPkts(pkts));
-            if (dispatched) {
-                for (uint8_t dev=0; dev<devicesPerRank; ++dev) {
-                    uint8_t device = dev + rank_offset;
-                    if (!devRdQ[device].empty()) {
-                        devRdQ[device].pop_front();
-                    }
-                }
-            }
-        }
-    }
-    
-    printDevWriteQueueStatus();
-
-    for (uint8_t rank=0; rank<ranksPerChannel; ++rank) {
-        uint8_t rank_offset = rank * devicesPerRank;
-        std::deque<DRAMPacket*> pkts = std::deque<DRAMPacket*>();
-        assert(pkts.empty());
-        for (uint8_t dev=0; dev<devicesPerRank; ++dev) {
-            uint8_t device = dev + rank_offset;
-            if (!devWrQ[device].empty())
-                pkts.push_back(devWrQ[device].front());
-        }
-        if (!pkts.empty()) {
-            bool dispatched = dispatchPackPkt(packShortPkts(pkts));
-            if (dispatched) {
-                for (uint8_t dev=0; dev<devicesPerRank; ++dev) {
-                    uint8_t device = dev + rank_offset;
-                    if (!devWrQ[device].empty()) {
-                        isInDevWrQ[device].erase(devBurstAlign(devWrQ[device].front()->addr));
-                        devWrQ[device].pop_front();
-                    }
-                }
-            }
-        } else
-            DPRINTF(Pack, "No dispatch from devWrQ to rank %d\n", rank);
     }
 }
 
@@ -1008,10 +842,7 @@ DRAMCtrl::recvTimingReq(PacketPtr pkt)
         if (!isVMCMode) {
             assert(drain() == DrainState::Drained);
             isVMCMode = true;
-            readBufferSize = 2;
-            writeBufferSize = 2;
-            DPRINTF(VMC, "Enter VMC mode, setting read/write buffer size to: %d/%d\n",
-                    readBufferSize, writeBufferSize);
+            DPRINTF(VMC, "Enter VMC mode\n");
             for (int i=0; i<ranksPerChannel; ++i)
                 splitRankToDevices(i);
         }
@@ -1027,7 +858,7 @@ DRAMCtrl::recvTimingReq(PacketPtr pkt)
         }
     } else {
         if (isVMCMode) {
-            DPRINTF(VMC, "Exiting VMC mode\n");
+            DPRINTF(VMC, "Exit VMC mode\n");
             isVMCMode = false;
             for (int i=0; i<ranksPerChannel; ++i)
                 mergeDevicesToRank(i);
@@ -1040,41 +871,40 @@ DRAMCtrl::recvTimingReq(PacketPtr pkt)
     panic_if(!(pkt->isRead() || pkt->isWrite()),
              "Should only see read and writes at memory controller\n");
 
-    // If we are not in VMC mode, direct this pkt to mem_ctrl dispatch.
-    if (!isVMCMode)
-        return dispatchPkt(pkt);
-    
-    /** Otherwise, we are in VMC mode. */
-    Addr addr = pkt->getAddr();
+    if (prevArrival != 0) {
+        totGap += curTick() - prevArrival;
+    }
+    prevArrival = curTick();
+
     unsigned size = pkt->getSize();
-    assert(size > 0);
-    // Get the offset into the first device.
-    unsigned offset = pkt->getAddr() & (devBurstSize - 1);
-    unsigned short_pkt_count = divCeil(offset + size, devBurstSize);
-    DRAMPacket* tmp_pkt = decodeAddr(pkt, addr, size, pkt->isRead());
-    // DPRINTF(VMC, "Generating temp pkt (%d) for rank %d\n", tmp_pkt->id, tmp_pkt->rank);
-    uint8_t first_device = tmp_pkt->device + devicesPerRank * tmp_pkt->rank;
-    delete tmp_pkt;
+    uint32_t pktBurstSize = isVMCMode?devBurstSize:burstSize;
+    unsigned offset = pkt->getAddr() & (pktBurstSize - 1);
+    unsigned short_pkt_count = divCeil(offset + size, pktBurstSize);
+    // DRAMPacket* tmp_pkt = decodeAddr(pkt, pkt->getAddr(), size, pkt->isRead());
+    // DPRINTF(VMC, "Generating temp pkt (%d) for device %d_%d\n",
+    //        tmp_pkt->id, tmp_pkt->rank, tmp_pkt->device);
+    // delete tmp_pkt;
     if (pkt->isRead()) {
-        if (devReadQueueFull(first_device, short_pkt_count)) {
-            DPRINTF(VMC, "Device read queue full, not accepting\n");
+        if (readQueueFull(short_pkt_count)) {
+            DPRINTF(VMC, "Read queue full, not accepting\n");
             retryRdReq = true;
             ++rdRetry;
             return false;
         } else {
-            addToDevReadQueue(pkt, first_device, short_pkt_count);
+            addToReadQueue(pkt, short_pkt_count);
             readReqs++;
             bytesReadSys += size;
         }
     } else {
         assert(pkt->isWrite());
-        if (devWriteQueueFull(first_device, short_pkt_count)) {
-            DPRINTF(VMC, "Device write queue full, not accepting\n");
+        assert(size != 0);
+        if (writeQueueFull(short_pkt_count)) {
+            DPRINTF(VMC, "Write queue full, not accepting\n");
             retryWrReq = true;
             ++wrRetry;
             return false;
         } else {
-            addToDevWriteQueue(pkt, first_device, short_pkt_count);
+            addToWriteQueue(pkt, short_pkt_count);
             writeReqs++;
             bytesWrittenSys += size;
         }
@@ -1113,133 +943,6 @@ DRAMCtrl::dPrintAddrRegs(uint8_t rank, uint8_t device) {
         DPRINTF(AddrRegs, "Pkt (%d)      |\n", push_pkt->id);
     }
     return;
-}
-
-/** weil0ng:
- * Dispatch pack packet into Read/Write Queue. Delete pkt on failure. We will re-gen
- * it next time.
- */
-bool
-DRAMCtrl::dispatchPackPkt(DRAMPacket* packPkt) {
-    // weil0ng: this is the vmc path.
-    assert(isVMCMode);
-    assert(packPkt->isPack);
-
-    // Calc avg gap between virtual requests.
-    if (prevArrival != 0) {
-        totGap += curTick() - prevArrival;
-    }
-    prevArrival = curTick();
-    if (prevPackArrival != 0) {
-        totPackGap += curTick() - prevPackArrival;
-    }
-    prevPackArrival = curTick();
-
-    // Pack pkt always translate to exactly 1 dram pkt.
-    // There are 2 types of pack pkts:
-    //   1. Read pkt, which packs several small read pkts.
-    //   2. Write pkt, which packs several small write pkts.
-    bool dispatched = false;
-    uint8_t rank = packPkt->rank;
-    if (packPkt->isRead) {
-        if (readQueueFull(1)) {
-            DPRINTF(Pack, "Fail to dispatch packRead (%d) because read queue full\n", packPkt->id);
-            ++rdDispatchFail;
-        } else {
-            DPRINTF(Pack, "Dispatching packRead (%d) to rank %d\n", packPkt->id, rank);
-            rdQLenPdf[readQueue.size() + respQueue.size()]++;
-            readQueue.push_back(packPkt);
-            avgRdQLen = readQueue.size() + respQueue.size();
-            ++packPkt->rankRef.readEntries;
-            ++packRdReqs;
-            dispatched = true;
-            for (int i=0; i<packPkt->packHelper->pkt_cnt; ++i) {
-                DRAMPacket* cur_pkt = (*(packPkt->packHelper))[i];
-                totDevQLat += (curTick() - cur_pkt->entryTime);
-            }
-        } 
-    } else {
-        if (writeQueueFull(1)) {
-            DPRINTF(Pack, "Fail to dispatch packWrite (%d) because write queue full\n", packPkt->id);
-            ++wrDispatchFail;
-        } else {
-            DPRINTF(Pack, "Dispatching packWrite (%d) to rank %d\n", packPkt->id, rank);
-            assert(writeQueue.size() < writeBufferSize);
-            wrQLenPdf[writeQueue.size()]++;
-            writeQueue.push_back(packPkt);
-            //isInWriteQueue.insert(burstAlign(packPkt->addr));
-            //assert(writeQueue.size() == isInWriteQueue.size());
-            avgWrQLen = writeQueue.size();
-            ++packPkt->rankRef.writeEntries;
-            ++packWrReqs;
-            dispatched = true;
-        }
-    }
-    if (!nextReqEvent.scheduled()) {
-        DPRINTF(VMC, "Request scheduled immmediately\n");
-        schedule(nextReqEvent, curTick());
-    }
-    if (!dispatched) {
-        assert(packPkt != NULL);
-        assert(packPkt->isPack);
-        assert(packPkt->packHelper != NULL);
-        delete packPkt->pkt;
-        delete packPkt->packHelper;
-        delete packPkt;
-    }
-    return dispatched;
-}
-
-bool
-DRAMCtrl::dispatchPkt(PacketPtr pkt)
-{
-    // weil0ng: this is the non-vmc path.
-    assert(!isVMCMode);
-    // Calc avg gap between requests
-    if (prevArrival != 0) {
-        totGap += curTick() - prevArrival;
-    }
-    prevArrival = curTick();
-
-    // Find out how many dram packets a pkt translates to
-    // If the burst size is equal or larger than the pkt size, then a pkt
-    // translates to only one dram packet. Otherwise, a pkt translates to
-    // multiple dram packets
-    unsigned size = pkt->getSize();
-    unsigned offset = pkt->getAddr() & (burstSize - 1);
-    unsigned dram_pkt_count = divCeil(offset + size, burstSize);
-
-    // check local buffers and do not accept if full
-    if (pkt->isRead()) {
-        assert(size != 0);
-        if (readQueueFull(dram_pkt_count)) {
-            // remember that we have to retry this port
-            DPRINTF(DRAM, "Read queue full, not accepting\n");
-            retryRdReq = true;
-            numRdRetry++;
-            return false;
-        } else {
-            addToReadQueue(pkt, dram_pkt_count);
-            readReqs++;
-            bytesReadSys += size;
-        }
-    } else {
-        assert(pkt->isWrite());
-        assert(size != 0);
-        if (writeQueueFull(dram_pkt_count)) {
-            DPRINTF(DRAM, "Write queue full, not accepting\n");
-            // remember that we have to retry this port
-            retryWrReq = true;
-            numWrRetry++;
-            return false;
-        } else {
-            addToWriteQueue(pkt, dram_pkt_count);
-            writeReqs++;
-            bytesWrittenSys += size;
-        }
-    }
-
-    return true;
 }
 
 void
@@ -1370,18 +1073,6 @@ DRAMCtrl::processRespondEvent()
     assert(respQueue.front() != NULL);
     respQueue.pop_front();
 
-    if (isVMCMode && !packEvent.scheduled()) {
-        if (curTick() > nextPackTime) {
-            DPRINTF(Pack, "Schedule pack event now\n");
-            schedule(packEvent, curTick());
-            nextPackTime = curTick() + packWaitTime;
-        } else {
-            schedule(packEvent, nextPackTime);
-            DPRINTF(Pack, "Schedule pack event at %lld (%ld)\n",
-                    nextPackTime, nextPackTime - curTick());
-        }
-    }
-
     if (dram_pkt->isPack) {
         delete dram_pkt->pkt->req;
         delete dram_pkt->pkt;
@@ -1502,25 +1193,18 @@ DRAMCtrl::chooseNext(std::deque<DRAMPacket*>& queue,
     // packet is simply moved to the head of the queue. The other
     // methods know that this is the place to look. For example, with
     // FCFS, this method does nothing
-    // assert(!queue.empty());
-    // weil0ng: if we are draining reads, there's a chance that the queue is empty.
-    if (!packRdDrain && !packWrDrain)
-        assert(!queue.empty());
-    else {
-        DPRINTF(VMC, "pack reqs draining\n");
-        if (queue.empty())
-            return false;
-    }
+    assert(!queue.empty());
     
     int found_id = -1;
 
     // bool to indicate if a packet to an available rank is found
     bool found_packet = false;
 
+    // Special case: if we only have 1 req.
     if (queue.size() == 1) {
         DRAMPacket* dram_pkt = queue.front();
-        if (!dram_pkt->isPack) {
-            assert(!isVMCMode);
+        if (!dram_pkt->isPack && !dram_pkt->isMicro) {
+            // case 1: wide access.
             // available rank corresponds to state refresh idle
             if (ranks[dram_pkt->rank]->isAvailable()) {
                 found_packet = true;
@@ -1529,19 +1213,45 @@ DRAMCtrl::chooseNext(std::deque<DRAMPacket*>& queue,
             } else {
                 DPRINTF(DRAM, "Single request, going to a busy rank\n");
             }
-        } else {
+        } else if (!dram_pkt->isPack) {
+            // case 2: micro access.
             assert(isVMCMode);
-            found_packet = dram_pkt->packReady();
-            if (found_packet)
-                found_id = dram_pkt->id;
+            assert(dram_pkt->isMicro && !dram_pkt->isPack);
+            // Try packing.
+            DRAMPacket* trial_pkt = tryPack(queue, queue.front()->rank);
+            assert(trial_pkt);
+            found_packet = trial_pkt->packReady();
+            if (found_packet) {
+                // Do the actual packing.
+                assert(packMicroPkts(queue, queue.front()->rank));
+                // Sanity check.
+                assert(checkPackEqual(trial_pkt, queue.front()));
+                found_id = queue.front()->id;
+            }
             else {
-                if (dram_pkt->canPush()) {
-                    DPRINTF(Push, "Pkt not found, but %d can push\n", dram_pkt->id);
+                if (trial_pkt->canPush()) {
+                    // Do the actual packing.
+                    assert(packMicroPkts(queue, queue.front()->rank));
+                    // Sanity check.
+                    assert(checkPackEqual(trial_pkt, queue.front()));
+                    dram_pkt = queue.front();
                     dram_pkt->preparePush();
                     DPRINTF(Push, "pushEvent (from %d) scheduled now\n", dram_pkt->id);
+                    // Do the push.
+                    if (prevPushScheduled > 0)
+                        totPushEventGap += curTick() - prevPushScheduled;
+                    prevPushScheduled = curTick();
                     dram_pkt->schedulePushEvents(curTick());
                 }
             }
+            // Destroy trial pkt.
+            assert(destroyTrialPkt(trial_pkt));
+        } else {
+            // case 3: pack access.
+            assert(dram_pkt->isPack && !dram_pkt->isMicro);
+            found_packet = dram_pkt->packReady();
+            if (found_packet)
+                found_id = dram_pkt->id;
         }
         if (isVMCMode) {
             if (found_packet)
@@ -1551,40 +1261,32 @@ DRAMCtrl::chooseNext(std::deque<DRAMPacket*>& queue,
         }
         return found_packet;
     }
-
-    // weil0ng: frfcfs when in VMC mode.
-    // We are picking either a PUSH when addrReg is available, or a packRd/Wt
-    // whose PUSH can be fired, or whose PUSH has alrady been fired. For non-pack
-    // pkts, we are using fcfs here because frfcfs might reorder pack pkts.
+    // Otherwise, if we have multiple reqs...
     if (isVMCMode) {
-        for (auto i=queue.begin(); i!=queue.end(); ++i) {
-            DRAMPacket* dram_pkt = *i;
-            assert(dram_pkt->isPack);
-            if (dram_pkt->packReady()) {
-                queue.erase(i);
-                queue.push_front(dram_pkt);
-                found_packet = true;
-                found_id = dram_pkt->id;
-                break;
-            }
-        }
-        if (!found_packet) {
-            for (auto i=queue.begin(); i!=queue.end(); ++i) {
-                DRAMPacket* dram_pkt = *i;
-                if (dram_pkt->canPush()) {
-                    DPRINTF(Push, "Pkt nut found, but %d can push\n", dram_pkt->id);
+        for (uint8_t i=0; i<ranksPerChannel; ++i) {
+            DRAMPacket* trial_pkt = tryPack(queue, i);
+            if (trial_pkt) {
+                if (trial_pkt->canPush()) {
+                    assert(packMicroPkts(queue, i));
+                    assert(checkPackEqual(trial_pkt, queue.front()));
+                    assert(destroyTrialPkt(trial_pkt));
+                    DRAMPacket* dram_pkt = queue.front();
                     dram_pkt->preparePush();
-                    DPRINTF(Push, "pushEvent scheduled now\n");
+                    DPRINTF(Push, "pushEvent (from %d) scheduled now\n", dram_pkt->id);
+                    if (prevPushScheduled > 0)
+                        totPushEventGap += curTick() - prevPushScheduled;
+                    prevPushScheduled = curTick();
                     dram_pkt->schedulePushEvents(curTick());
-                    break;
+                } else {
+                    assert(destroyTrialPkt(trial_pkt));
                 }
             }
         }
-    } else if (memSchedPolicy == Enums::fcfs) {
-        // check if there is a packet going to a free rank
-        for (auto i = queue.begin(); i != queue.end() ; ++i) {
+
+        // frfcfs for pack pkts.
+        for (auto i=queue.begin(); i!=queue.end(); ++i) {
             DRAMPacket* dram_pkt = *i;
-            if (ranks[dram_pkt->rank]->isAvailable()) {
+            if (dram_pkt->isPack && dram_pkt->packReady()) {
                 queue.erase(i);
                 queue.push_front(dram_pkt);
                 found_packet = true;
@@ -1592,10 +1294,25 @@ DRAMCtrl::chooseNext(std::deque<DRAMPacket*>& queue,
                 break;
             }
         }
-    } else if (memSchedPolicy == Enums::frfcfs) {
-        found_packet = reorderQueue(queue, extra_col_delay);
-    } else
-        panic("No scheduling policy chosen\n");
+    } else {
+        // All wide accesses.
+        if (memSchedPolicy == Enums::fcfs) {
+            // check if there is a packet going to a free rank
+            for (auto i = queue.begin(); i != queue.end() ; ++i) {
+                DRAMPacket* dram_pkt = *i;
+                if (ranks[dram_pkt->rank]->isAvailable()) {
+                    queue.erase(i);
+                    queue.push_front(dram_pkt);
+                    found_packet = true;
+                    found_id = dram_pkt->id;
+                    break;
+                }
+            }
+        } else if (memSchedPolicy == Enums::frfcfs) {
+            found_packet = reorderQueue(queue, extra_col_delay);
+        } else
+            panic("No scheduling policy chosen\n");
+    }
     if (isVMCMode) {
         if (found_packet)
             DPRINTF(VMC, "Pkt %d found\n", found_id);
@@ -2222,8 +1939,8 @@ DRAMCtrl::doSingleBankAccess(DRAMPacket* dram_pkt, Tick busBusyUntil) {
     // Update bus state
     busBusyUntil = dram_pkt->readyTime;
 
-    DPRINTF(DRAM, "Single access to %#08x, ready at %lld bus busy until %lld.\n",
-            dram_pkt->addr, dram_pkt->readyTime, busBusyUntil);
+    DPRINTF(DRAM, "Single access to %#08x, ready at %lld busBusyUntil %d cycles later.\n",
+            dram_pkt->addr, dram_pkt->readyTime, (busBusyUntil - curTick())/tCK);
 
     dram_pkt->rankRef.cmdList.push_back(Command(command, dram_pkt->bank,
                                         cmd_at));
@@ -2484,8 +2201,9 @@ DRAMCtrl::doMultiBankAccess(DRAMPacket* dram_pkt, Tick busBusyUntil) {
 
     // Clear the addrRegs.
     assert(dram_pkt_cmd_at >= curTick());
-    DPRINTF(Push, "clearEvent (from %d) scheduled at %lld\n",
-            dram_pkt->id, pushed_dram_pkt_cmd_at);
+    DPRINTF(Push, "clearEvent (from %d) scheduled at %lld (%d)\n",
+            dram_pkt->id, pushed_dram_pkt_cmd_at,
+            (pushed_dram_pkt_cmd_at - curTick())/tCK);
     dram_pkt->prepareClear();
     dram_pkt->scheduleClearEvents(pushed_dram_pkt_cmd_at);
 
@@ -2496,9 +2214,8 @@ DRAMCtrl::doMultiBankAccess(DRAMPacket* dram_pkt, Tick busBusyUntil) {
             busBusyUntil = cur_pkt->readyTime;
     }
     dram_pkt->readyTime = busBusyUntil;
-    DPRINTF(VMC, "Access done at %lld (%d) for pack %d, busBusyUntil %lld (%d)\n",
-            dram_pkt->readyTime, dram_pkt->readyTime - curTick(), 
-            dram_pkt->id, busBusyUntil, busBusyUntil - curTick());
+    DPRINTF(VMC, "Access done at %lld for pack %d, busBusyUntil %d cycles later.\n",
+            dram_pkt->readyTime, dram_pkt->id, (busBusyUntil - curTick())/tCK);
 
     for (int i=0; i<dram_pkt->packHelper->pkt_cnt; ++i) {
         DRAMPacket* cur_pkt = (*(dram_pkt->packHelper))[i];
@@ -2561,13 +2278,6 @@ DRAMCtrl::doDRAMAccess(DRAMPacket* dram_pkt)
     // request to not introduce any unecessary bubbles. In most cases
     // we will wake up sooner than we have to.
     nextReqTime = busBusyUntil - (tRP + tRCD + tCL);
-}
-
-void
-DRAMCtrl::processPackEvent()
-{
-    DPRINTF(Pack, "Process packEvent\n");
-    tryPackAndDispatch();
 }
 
 void
@@ -2688,36 +2398,7 @@ DRAMCtrl::processNextReqEvent()
         // track if we should switch or not
         bool switch_to_writes = false;
 
-        if (isVMCMode && readQueue.empty()) {
-        // weil0ng: if there's no dispatched read, might be one of:
-        //  1) Waiting for packing
-        //  2) No more devRdPkt waiting
-        //      if so, we check if need to switch to write
-            bool allEmpty = true;
-            for (uint8_t i=0; i<ranksPerChannel * devicesPerRank; ++i)
-                allEmpty &= devRdQ[i].empty();
-            if (allEmpty) {
-                bool someHasWrite = false;
-                bool someHitsThres = false;
-                for (uint8_t i=0; i<ranksPerChannel * devicesPerRank; ++i) {
-                    someHasWrite |= !devWrQ[i].empty();
-                    someHitsThres |= (devWrQ[i].size() > packWriteLowThreshold);
-                }
-                if (someHasWrite && (drainState() == DrainState::Draining || someHitsThres)) {
-                    switch_to_writes = true;
-                } else {
-                    if (drainState() == DrainState::Draining &&
-                            respQueue.empty() && allRanksDrained()) {
-                        signalDrainDone();
-                    }
-                    return;
-                }
-            } else {
-                // weil0ng: wait for packing or responding.
-                assert(packEvent.scheduled() || !respQueue.empty());
-                return;
-            }
-        } else if (readQueue.empty()) {
+        if (readQueue.empty()) {
             // In the case there is no read request to go next,
             // trigger writes if we have passed the low threshold (or
             // if we are draining)
@@ -2813,18 +2494,19 @@ DRAMCtrl::processNextReqEvent()
 
             respQueue.push_back(dram_pkt);
 
-            bool switchCondSatisfied = false;
+            bool switchCondSatisfied = writeQueue.size() > writeHighThreshold;
             // weil0ng: before switch to WRITE, check if some pack read has been pushed.
             if (isVMCMode) {
-                for (uint8_t i=0; i<ranksPerChannel * devicesPerRank; ++i)
-                    switchCondSatisfied |= (devWrQ[i].size() > packWriteHighThreshold);
                 int pushed_reads = 0;
                 for (auto r : ranks) {
                     for (auto d : r->devices) {
-                        if (!(d->addrRegs.empty() ||
+                        if (!((d->addrRegs.empty() && !d->pushEvent.scheduled()) ||
                                     (d->addrRegs.size() == 1 &&
-                                     d->clearEvent.scheduled())))
+                                     d->clearEvent.scheduled()))) {
+                            DPRINTF(Push, "Pushed addr found on rank%d_device%d\n",
+                                    r->rank, d->device);
                             ++pushed_reads;
+                        }
                     }
                 }
                 if (pushed_reads > 0) {
@@ -2832,21 +2514,30 @@ DRAMCtrl::processNextReqEvent()
                     DPRINTF(Push, "Still has %d pushed reads\n", pushed_reads);
                     for (auto i=readQueue.begin(); i!=readQueue.end(); ++i) {
                         DRAMPacket* cur_pkt = *i;
-                        if (cur_pkt->isPack)
+                        if (cur_pkt->isPack) {
                             pendingReqs += cur_pkt->packHelper->pkt_cnt;
+                            for(int i=0; i<cur_pkt->packHelper->pkt_cnt; ++i) {
+                                DRAMPacket* p_pkt = (*(cur_pkt->packHelper))[i];
+                                DPRINTF(Push, "Pending read to rank%d_device%d\n",
+                                        p_pkt->rank, p_pkt->device);
+                            }
+                        }
                     }
+                    DPRINTF(Push, "Still has %d pending micro reads\n", pendingReqs);
                     assert(pushed_reads <= pendingReqs);
-                    if (switchCondSatisfied) {
+                    if (!packRdDrain && switchCondSatisfied) {
                         DPRINTF(Push, "Start draining packRead pkts\n");
                         packRdDrain = true;
+                        packRdDrainStartTick = curTick();
                     }
                 } else {
-                    if (packRdDrain)
+                    if (packRdDrain) {
                         packRdDrain = false;
+                        totPackRdDrainTime += (curTick() - packRdDrainStartTick);
+                    }
                 }
             } else {
                 assert(!packRdDrain);
-                switchCondSatisfied = writeQueue.size() > writeHighThreshold;
             }
 
             // we have so many writes that we have to transition
@@ -2868,14 +2559,9 @@ DRAMCtrl::processNextReqEvent()
 
         // If we are changing command type, incorporate the minimum
         // bus turnaround delay
-        if (isVMCMode) {
-            if (writeQueue.empty()) {
-            // weil0ng: might need to wait for packing
-                assert(packEvent.scheduled());
-                return;
-            }
+        if (isVMCMode)
             DPRINTF(VMC, "ChooseNext from write queue\n");
-        }
+
         found_write = chooseNext(writeQueue,
                                  switched_cmd_type ? std::min(tRTW, tCS) : 0);
 
@@ -2907,18 +2593,6 @@ DRAMCtrl::processNextReqEvent()
         doDRAMAccess(dram_pkt);
 
         writeQueue.pop_front();
-
-        if (isVMCMode && !packEvent.scheduled()) {
-            if (curTick() > nextPackTime) {
-                DPRINTF(Pack, "Schedule pack event now\n");
-                schedule(packEvent, curTick());
-                nextPackTime = curTick() + packWaitTime;
-            } else {
-                schedule(packEvent, nextPackTime);
-                DPRINTF(Pack, "Schedule pack event at %lld (%ld)\n",
-                        nextPackTime, nextPackTime - curTick());
-            }
-        }
 
         // removed write from queue, decrement count
         if (!dram_pkt->isPack)
@@ -2962,28 +2636,32 @@ DRAMCtrl::processNextReqEvent()
             }
         }
 
-        isInWriteQueue.erase(burstAlign(dram_pkt->addr));
+        if (dram_pkt->isPack) {
+            for(int i=0; i<dram_pkt->packHelper->pkt_cnt; ++i) {
+                DRAMPacket* cur_pkt = (*(dram_pkt->packHelper))[i];
+                isInWriteQueue.erase(devBurstAlign(cur_pkt->addr));
+            }
+        } else {
+            isInWriteQueue.erase(burstAlign(dram_pkt->addr));
+        }
 
-        bool switchCondSatisfied = false;
+
+        bool switchCondSatisfied = (writeQueue.empty() ||
+                (writeQueue.size() + minWritesPerSwitch < writeLowThreshold &&
+                 drainState() != DrainState::Draining) ||
+                (!readQueue.empty() && writesThisTime >= minWritesPerSwitch)); 
         // weil0ng: before switch to READ, check if some pack write has been pushed.
         if (isVMCMode) {
-            bool allEmpty = true;
-            bool allBelowThres = (drainState() != DrainState::Draining);
-            bool someHasRead = false;
-            for (uint8_t i=0; i<ranksPerChannel * devicesPerRank; ++i) {
-                allEmpty &= devWrQ[i].empty();
-                allBelowThres &= (devWrQ[i].size() + minWritesPerSwitch < packWriteLowThreshold);
-                someHasRead |= !devRdQ[i].empty();
-            }
-            someHasRead = someHasRead && (writesThisTime > minWritesPerSwitch);
-            switchCondSatisfied = allEmpty || allBelowThres || someHasRead;
             int pushed_writes = 0;
             for (auto r : ranks) {
                 for (auto d : r->devices) {
-                    if (!(d->addrRegs.empty() ||
+                    if (!((d->addrRegs.empty() && !d->pushEvent.scheduled()) ||
                                 (d->addrRegs.size() == 1 &&
-                                 d->clearEvent.scheduled())))
+                                 d->clearEvent.scheduled()))) {
+                        DPRINTF(Push, "Pushed addr found on rank%d_device%d\n",
+                                r->rank, d->device);
                         ++pushed_writes;
+                    }
                 }
             }
             // weil0ng: if there's pushed pkts, check how many short pkts are still pending.
@@ -2995,20 +2673,21 @@ DRAMCtrl::processNextReqEvent()
                     if (cur_pkt->isPack)
                         pendingReqs += cur_pkt->packHelper->pkt_cnt;
                 }
+                DPRINTF(Push, "Still has %d pending micro writes\n", pendingReqs);
                 assert(pushed_writes <= pendingReqs);
-                if (switchCondSatisfied) {
+                if (!packWrDrain && switchCondSatisfied) {
                     DPRINTF(Push, "Start draining packWrite pkts\n");
                     packWrDrain = true;
+                    packWrDrainStartTick = curTick();
                 }
             } else {
-                if (packWrDrain)
+                if (packWrDrain) {
                     packWrDrain = false;
+                    totPackWrDrainTime += (curTick() - packWrDrain);
+                }
             }
         } else {
-            switchCondSatisfied = (writeQueue.empty() ||
-                    (writeQueue.size() + minWritesPerSwitch < writeLowThreshold &&
-                     drainState() != DrainState::Draining) ||
-                    (!readQueue.empty() && writesThisTime >= minWritesPerSwitch)); 
+            assert(!packWrDrain);
         }
 
         // If we emptied the write queue, or got sufficiently below the
@@ -3026,7 +2705,7 @@ DRAMCtrl::processNextReqEvent()
         }
         assert(dram_pkt != NULL);
         // weilong: ninja bug?
-        // Should't destroy here, clearEvent is scheduled later, destroy pkt there!
+        // Shouldn't destroy actual pkts here, clearEvent is scheduled earlier, destroy pkts there!
         if (dram_pkt->isPack) {
             delete dram_pkt->pkt->req;
             delete dram_pkt->pkt;
@@ -4172,6 +3851,7 @@ DRAMCtrl::Device::processPushEvent()
             rank, device, memory.busBusyUntil, (long)memory.busBusyUntil - (long)curTick());
     // There must be a thing to push.
     assert(pendingPushPkt);
+    DPRINTF(Push, "pkt %d to be pushed\n", pendingPushPkt->id);
     // We must have not pushed the pkt already.
     assert(pendingPushPkt->addrReadyAt == 0);
     ++memory.pushReqs;
@@ -4188,16 +3868,17 @@ DRAMCtrl::Device::processPushEvent()
             curTick() >= memory.busBusyUntil);
     // Update addrReadyAt.
     pendingPushPkt->addrReadyAt = curTick() + memory.pushDelay;
-    DPRINTF(Push, "Push addr ready at %lld (%ld) on rank%d_device%d\n",
-            pendingPushPkt->addrReadyAt, (long)pendingPushPkt->addrReadyAt - (long)curTick(),
+    DPRINTF(Push, "Push addr from pkt (%d) ready at %lld (%d) on rank%d_device%d\n",
+            pendingPushPkt->id, pendingPushPkt->addrReadyAt,
+            (long)pendingPushPkt->addrReadyAt - (long)curTick(),
             rank, device);
-    // Reset.
-    pendingPushPkt = NULL;
     if (!memory.nextReqEvent.scheduled()) {
         DPRINTF(VMC, "Request scheduled immediately after push\n");
+        //memory.schedule(memory.nextReqEvent, pendingPushPkt->addrReadyAt);
         memory.schedule(memory.nextReqEvent, curTick());
     }
-
+    // Reset.
+    pendingPushPkt = NULL;
     memory.dPrintAddrRegs(rank, device);
 }
 
@@ -4832,17 +4513,6 @@ DRAMCtrl::regStats()
         .desc("Average write queue length when enqueuing")
         .precision(2);
 
-    // weil0ng: init stats for short reqs per dev.
-    avgDevRdQLen
-        .init(devicesPerRank * ranksPerChannel)
-        .name(name() + ".avgDevRdQLen")
-        .desc("Average read queue length for each device when enqueuing");
-
-    avgDevWrQLen
-        .init(devicesPerRank * ranksPerChannel)
-        .name(name() + ".avgDevWrQLen")
-        .desc("Average write queue length for each device when enqueuing");
-
     rdRetry
         .name(name() + ".rdRetry")
         .desc("Total number of read retry due to read queue full in VMC mode");
@@ -4968,15 +4638,29 @@ DRAMCtrl::regStats()
         .name(name() + ".wrQLenPdf")
         .desc("What write queue length does an incoming req see");
 
-     devRdQLenPdf
-         .init(ranksPerChannel * devicesPerRank, vmcReadBufferSize)
-         .name(name() + ".devRdQLenPdf")
-         .desc("What dev read queue length does an incoming req see");
+     devRdQLen
+         .init(ranksPerChannel * devicesPerRank)
+         .name(name() + ".devRdQLen")
+         .desc("Accumulative dev read queue size per device");
 
-     devWrQLenPdf
-         .init(ranksPerChannel * devicesPerRank, vmcWriteBufferSize)
-         .name(name() + ".devWrQLenPdf")
-         .desc("What dev write queue length does an incoming req see");
+     devWrQLen
+         .init(ranksPerChannel * devicesPerRank)
+         .name(name() + ".devWrQLen")
+         .desc("Accumulative dev write queue size per device");
+
+     avgDevRdQLen
+        .name(name() + ".avgDevRdQLen")
+        .desc("Average device read queue length")
+        .precision(2);
+     
+     avgDevRdQLen = sum(devRdQLen) / (ranksPerChannel * devicesPerRank);
+
+     avgDevWrQLen
+        .name(name() + ".avgDevWrQLen")
+        .desc("Average device write queue length")
+        .precision(2);
+     
+     avgDevWrQLen = sum(devWrQLen) / (ranksPerChannel * devicesPerRank);
 
      bytesPerActivate
          .init(maxAccessesPerRow)
@@ -5007,6 +4691,14 @@ DRAMCtrl::regStats()
          .name(name() + ".pckLength")
          .desc("# of pkts packed once")
          .flags(nozero);
+
+     totPackRdDrainTime
+         .name(name() + ".totPackRdDrainTime")
+         .desc("Total time spent draining pack rd reqs");
+
+     totPackWrDrainTime
+         .name(name() + ".totPackWrDrainTime")
+         .desc("Total time spent draining pack wr reqs");
 
      wrPerTurnAround
          .init(writeBufferSize)
@@ -5086,6 +4778,10 @@ DRAMCtrl::regStats()
     totPushGap
         .name(name() + ".totPushGap")
         .desc("Total gap between address push");
+
+    totPushEventGap
+        .name(name() + ".totPushEventGap")
+        .desc("Total gap between push events");
 
     totPushDelay
         .name(name() + ".totPushDelay")

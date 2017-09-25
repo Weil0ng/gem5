@@ -7,6 +7,7 @@ cscope.out
 *~
 .*.swp
 m5out
+*tags*
 /src/doxygen
 /ext/dramsim2/DRAMSim2
 /ext/mcpat/regression/*/*.out
