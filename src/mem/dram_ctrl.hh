@@ -182,14 +182,19 @@ class DRAMCtrl : public AbstractMemory
      * The bank also keeps track of how many bytes have been accessed
      * in the open row since it was opened.
      */
-    class Bank
+    class DRAMPacket;
+    class Bank : public EventManager
     {
 
       public:
 
+        DRAMCtrl& memory;
+
         static const uint32_t NO_ROW = -1;
 
         uint32_t openRow;
+        uint8_t rank;
+        uint8_t device;
         uint8_t bank;
         uint8_t bankgr;
 
@@ -200,13 +205,58 @@ class DRAMCtrl : public AbstractMemory
         uint32_t rowAccesses;
         uint32_t bytesAccessed;
 
-        Bank() :
-            openRow(NO_ROW), bank(0), bankgr(0),
-            colAllowedAt(0), preAllowedAt(0), actAllowedAt(0),
-            rowAccesses(0), bytesAccessed(0)
-        { }
+        /** weil0ng:
+         * The following two pkts are actual dram_pkts to the bank.
+         * Not the pack pkts.
+         */
+        DRAMPacket* pendingRdPushPkt;
+        DRAMPacket* pendingRdClearPkt;
+        DRAMPacket* pendingWrPushPkt;
+        DRAMPacket* pendingWrClearPkt;
+
+        Tick prevPushTick;
+        
+        void processPushEvent(bool isRead);
+
+        void processRdPushEvent();
+        EventWrapper<Bank, &Bank::processRdPushEvent>
+        rdPushEvent;
+
+        void processWrPushEvent();
+        EventWrapper<Bank, &Bank::processWrPushEvent>
+        wrPushEvent;
+
+        void processClearEvent(bool isRead);
+
+        void processRdClearEvent();
+        EventWrapper<Bank, &Bank::processRdClearEvent>
+        rdClearEvent;
+
+        void processWrClearEvent();
+        EventWrapper<Bank, &Bank::processWrClearEvent>
+        wrClearEvent;
+
+        /** weil0ng:
+         * Address registers per device. 
+         * TODO: for now, one reg for each bank.
+         */
+        std::deque<DRAMPacket*> rdAddrRegs;
+        std::deque<DRAMPacket*> wrAddrRegs;
+
+        Bank(DRAMCtrl& _memory, uint8_t _rank, uint8_t _device);
+
+        const std::string name() const
+        {
+            return csprintf("%s_r%d_d%d_b%d", memory.name(), rank, device, bank);
+        }
 
         void reset() {
+            assert(!pendingRdPushPkt);
+            assert(!pendingRdClearPkt);
+            assert(!pendingWrPushPkt);
+            assert(!pendingWrClearPkt);
+            assert(rdAddrRegs.empty());
+            assert(wrAddrRegs.empty());
             openRow = NO_ROW;
             colAllowedAt = 0;
             preAllowedAt = 0;
@@ -309,7 +359,7 @@ class DRAMCtrl : public AbstractMemory
         /**
          * A reference to the hosting Rank instance
          */
-        Rank& rank_ref;
+        Rank& rankRef;
 
       private:
         /**
@@ -450,6 +500,11 @@ class DRAMCtrl : public AbstractMemory
         Tick wakeUpAllowedAt;
 
         /**
+         * weil0ng: push will occupy dbus.
+         */
+        Tick pushAllowedAt;
+
+        /**
          * One DRAMPower instance per rank
          */
         DRAMPower power;
@@ -466,23 +521,8 @@ class DRAMCtrl : public AbstractMemory
          * Vector of Banks. Each rank is made of several devices which in
          * term are made from several banks.
          */
-        std::vector<Bank> banks;
+        std::vector<Bank*> banks;
 
-        /** weil0ng:
-         * Address registers per device. 
-         * TODO: design knob. For now, FIFO structure.
-         */
-        std::deque<DRAMPacket*> addrRegs;
-
-        /** weil0ng:
-         * The following two pkts are actual dram_pkts to the device.
-         * Not the pack pkts.
-         */
-        DRAMPacket* pendingClearPkt;
-        DRAMPacket* pendingPushPkt;
-
-        Tick prevPushTick;
-        
         /**
          *  To track number of banks which are currently active for
          *  this rank.
@@ -625,14 +665,6 @@ class DRAMCtrl : public AbstractMemory
         void processWakeUpEvent();
         EventWrapper<Device, &Device::processWakeUpEvent>
         wakeUpEvent;
-
-        void processPushEvent();
-        EventWrapper<Device, &Device::processPushEvent>
-        pushEvent;
-
-        void processClearEvent();
-        EventWrapper<Device, &Device::processClearEvent>
-        clearEvent;
     };
 
     /**
@@ -847,7 +879,7 @@ class DRAMCtrl : public AbstractMemory
          * Vector of Banks. Each rank is made of several devices which in
          * term are made from several banks.
          */
-        std::vector<Bank> banks;
+        std::vector<Bank*> banks;
 
         std::vector<Device*> devices;
 
@@ -1127,9 +1159,13 @@ class DRAMCtrl : public AbstractMemory
          * If not a split packet (common case), this is set to NULL
          */
         BurstHelper* burstHelper;
+
+        /**
+         * References to rank_device_bank of the first 8B.
+         */
+        Rank& rankRef;
         Device& deviceRef;
         Bank& bankRef;
-        Rank& rankRef;
 
         /** weil0ng: a pointer to PackHelper if this DRAMPacket is a
          * consolidated DRAMPacket, otherwise, this is NULL.
@@ -1144,16 +1180,16 @@ class DRAMCtrl : public AbstractMemory
                    bool is_micro, bool is_pack, 
                    uint8_t _rank, uint8_t _bank,
                    uint32_t _row, uint8_t _device, uint16_t bank_id,
-                   Addr _addr, unsigned int _size, Device& dev_ref,
-                   Bank& bank_ref, Rank& rank_ref)
+                   Addr _addr, unsigned int _size, 
+                   Rank& rank_ref, Device& dev_ref, Bank& bank_ref)
             : entryTime(curTick()), readyTime(curTick()), addrReadyAt(0),
               pkt(_pkt), isRead(is_read),
               isMicro(is_micro), isPack(is_pack),
               rank(_rank), bank(_bank),
               row(_row), device(_device),
               bankId(bank_id), addr(_addr), size(_size),
-              burstHelper(NULL), deviceRef(dev_ref),
-              bankRef(bank_ref), rankRef(rank_ref),
+              burstHelper(NULL), rankRef(rank_ref), 
+              deviceRef(dev_ref), bankRef(bank_ref),
               packHelper(NULL), id(++sid)
         { }
 
@@ -1395,10 +1431,10 @@ class DRAMCtrl : public AbstractMemory
      * @param act_tick Time when the activation takes place
      * @param row Index of the row
      */
-    void activateBank(Rank& rank_ref, Bank& bank_ref, Tick act_tick,
+    void activateBank(Rank& rankRef, Bank& bankRef, Tick act_tick,
                       uint32_t row);
     
-    void activateBank(Device& device_ref, Bank& bank_ref,
+    void activateBank(Device& deviceRef, Bank& bankRef,
                       Tick act_tick, uint32_t row);
 
     /**
@@ -1411,10 +1447,10 @@ class DRAMCtrl : public AbstractMemory
      * @param pre_at Time when the precharge takes place
      * @param trace Is this an auto precharge then do not add to trace
      */
-    void prechargeBank(Rank& rank_ref, Bank& bank_ref,
+    void prechargeBank(Rank& rankRef, Bank& bankRref,
                        Tick pre_at, bool trace = true);
 
-    void prechargeBank(Device& device_ref, Bank& bank_ref,
+    void prechargeBank(Device& deviceRef, Bank& bankRef,
                        Tick pre_at, bool trace = true);
 
     /**
@@ -1503,6 +1539,8 @@ class DRAMCtrl : public AbstractMemory
     // weil0ng: size for address regs.
     const uint32_t addrRegsPerDevice;
     uint32_t writeBufferSize;
+    float writeHighThresPerc;
+    float writeLowThresPerc;
     uint32_t writeHighThreshold;
     uint32_t writeLowThreshold;
     const uint32_t minWritesPerSwitch;
@@ -1762,7 +1800,7 @@ class DRAMCtrl : public AbstractMemory
     bool recvTimingReq(PacketPtr pkt);
     bool dispatchPkt(PacketPtr pkt);
     // weil0ng: debug only, print addrRegs.
-    void dPrintAddrRegs(uint8_t rank, uint8_t device);
+    void dPrintAddrRegs(uint8_t rank, uint8_t device, bool isRead);
     void dPrintEventCount(uint8_t rank, bool inc, std::string reason);
 };
 
