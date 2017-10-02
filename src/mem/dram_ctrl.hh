@@ -504,6 +504,9 @@ class DRAMCtrl : public AbstractMemory
          */
         Tick pushAllowedAt;
 
+        // weil0ng: data bus status.
+        Tick busBusyUntil;
+
         /**
          * One DRAMPower instance per rank
          */
@@ -1062,38 +1065,6 @@ class DRAMCtrl : public AbstractMemory
     };
 
     /**
-     * weil0ng:
-     * A PackHelper helps remember which short DRAMPackets 
-     * an consolidated DRAMPacket has.
-     */
-    class PackHelper {
-
-        public:
-
-          const size_t pkt_cnt;
-          std::deque<DRAMPacket*>* pkts;
-
-          PackHelper(size_t _pkt_cnt, std::deque<DRAMPacket*>* _pkts)
-              : pkt_cnt(_pkt_cnt), pkts(_pkts)
-          { }
-
-          DRAMPacket* operator[](int i) {
-              assert(i>=0 && i<pkt_cnt);
-              return (*pkts)[i];
-          }
-
-          void destroyPkts() {
-              assert(pkts);
-              for (DRAMPacket* p : *pkts)
-                  delete p;
-          }
-
-          ~PackHelper() {
-              delete pkts;
-          }
-    };
-
-    /**
      * A DRAM packet stores packets along with the timestamp of when
      * the packet entered the queue, and also the decoded address.
      */
@@ -1119,7 +1090,6 @@ class DRAMCtrl : public AbstractMemory
 
         // weil0ng
         const bool isMicro; // Is this a micro-access pkt?
-        const bool isPack; // Is this a pack pkt?
 
         /** Will be populated by address decoder */
         const uint8_t rank;
@@ -1167,11 +1137,6 @@ class DRAMCtrl : public AbstractMemory
         Device& deviceRef;
         Bank& bankRef;
 
-        /** weil0ng: a pointer to PackHelper if this DRAMPacket is a
-         * consolidated DRAMPacket, otherwise, this is NULL.
-         */
-        PackHelper* packHelper;
-
         /** weil0ng: id for debug tracking
          */
         int id;
@@ -1184,20 +1149,20 @@ class DRAMCtrl : public AbstractMemory
                    Rank& rank_ref, Device& dev_ref, Bank& bank_ref)
             : entryTime(curTick()), readyTime(curTick()), addrReadyAt(0),
               pkt(_pkt), isRead(is_read),
-              isMicro(is_micro), isPack(is_pack),
+              isMicro(is_micro),
               rank(_rank), bank(_bank),
               row(_row), device(_device),
               bankId(bank_id), addr(_addr), size(_size),
               burstHelper(NULL), rankRef(rank_ref), 
               deviceRef(dev_ref), bankRef(bank_ref),
-              packHelper(NULL), id(++sid)
+              id(++sid)
         { }
 
         /* weil0ng:
          * Check if a pack DRAMPacket is ready to fire.
          * Check deviced availability and addresses availability.
          */
-        bool packReady();
+        bool ready();
 
         /* weil0ng:
          * Check if a pack DRAMPacket can be pushed to addrRegs.
@@ -1326,7 +1291,7 @@ class DRAMCtrl : public AbstractMemory
 
     Tick doSingleBankAccess(DRAMPacket* dram_pkt, Tick busBusyUntil);
 
-    Tick doMultiBankAccess(DRAMPacket* dram_pkt, Tick busBusyUntil);
+    Tick doMicroBankAccess(DRAMPacket* dram_pkt, Tick busBusyUntil);
 
     /**
      * When a packet reaches its "readyTime" in the response Q,
@@ -1363,23 +1328,6 @@ class DRAMCtrl : public AbstractMemory
                            bool isRead);
 
     /**
-     * weil0ng: return a pack pkt, but does not replace in the queue.
-     */
-    DRAMPacket* tryPack(std::deque<DRAMPacket*>& queue, uint8_t rank);
-
-    /**
-     * weil0ng: pack micro pkts into a pack pkt and put it in front.
-     */
-    bool packMicroPkts(std::deque<DRAMPacket*>& queue, uint8_t rank);
-
-    /**
-     * weil0ng: destroy trial pkt.
-     */
-    bool destroyTrialPkt(DRAMPacket* packPkt);
-
-    bool checkPackEqual(DRAMPacket* pkt1, DRAMPacket* pkt2);
-
-    /**
      * The memory schduler/arbiter - picks which request needs to
      * go next, based on the specified policy such as FCFS or FR-FCFS
      * and moves it to the head of the queue.
@@ -1394,7 +1342,7 @@ class DRAMCtrl : public AbstractMemory
     // weil0ng: add an argument virtAddrNeeded. When it is set
     // we find the corresponding virtAddrPkt instead no matther
     // what policy the scheduler uses. Defaults to false.
-    bool chooseNext(std::deque<DRAMPacket*>& queue, Tick extra_col_delay);
+    int chooseNext(std::deque<DRAMPacket*>& queue, Tick extra_col_delay);
 
     /**
      * For FR-FCFS policy reorder the read/write queue depending on row buffer
@@ -1636,11 +1584,7 @@ class DRAMCtrl : public AbstractMemory
     Stats::Scalar readReqs;
     Stats::Scalar writeReqs;
     Stats::Scalar pushReqs;
-    Stats::Scalar packRdReqs;
-    Stats::Scalar packWrReqs;
-    Stats::Formula packReqs;
     Stats::Scalar readBursts;
-    Stats::Scalar devReadBursts;
     Stats::Scalar writeBursts;
     Stats::Scalar devWriteBursts;
     Stats::Scalar bytesReadDRAM;
@@ -1649,7 +1593,6 @@ class DRAMCtrl : public AbstractMemory
     Stats::Scalar bytesReadSys;
     Stats::Scalar bytesWrittenSys;
     Stats::Scalar servicedByWrQ;
-    Stats::Scalar servicedByDevWrQ;
     Stats::Scalar mergedWrBursts;
     Stats::Scalar neitherReadNorWrite;
     Stats::Vector perCoreReqs;
@@ -1658,7 +1601,6 @@ class DRAMCtrl : public AbstractMemory
     Stats::Scalar numRdRetry;
     Stats::Scalar numWrRetry;
     Stats::Scalar totGap;
-    Stats::Scalar totPackGap;
     Stats::Scalar totPushGap;
     Stats::Scalar totPushEventGap;
     Stats::Scalar totPushDelay;
@@ -1669,12 +1611,6 @@ class DRAMCtrl : public AbstractMemory
     Stats::Histogram bytesPerActivate;
     Stats::Histogram rdPerTurnAround;
     Stats::Histogram wrPerTurnAround;
-    // weil0ng: record packing efficiency.
-    Stats::Histogram pckRdLength;
-    Stats::Histogram pckWrLength;
-    Stats::Histogram pckLength;
-    Stats::Scalar totPackRdDrainTime;
-    Stats::Scalar totPackWrDrainTime;
     Stats::Vector devRdQLen;
     Stats::Vector devWrQLen;
     Stats::Formula avgDevRdQLen;
@@ -1682,15 +1618,19 @@ class DRAMCtrl : public AbstractMemory
 
     // Latencies summed over all requests
     Stats::Scalar totQLat;
-    Stats::Scalar totDevQLat;
+    Stats::Scalar totQCycle;
+    Stats::Scalar totMCQCycle;
     Stats::Scalar totMemAccLat;
+    Stats::Scalar totMemAccCycle;
     Stats::Scalar totBusLat;
 
     // Average latencies per request
     Stats::Formula avgQLat;
-    Stats::Formula avgDevQLat;
+    Stats::Formula avgQCycle;
+    Stats::Formula avgMCQCycle;
     Stats::Formula avgBusLat;
     Stats::Formula avgMemAccLat;
+    Stats::Formula avgMemAccCycle;
 
     // Average bandwidth
     Stats::Formula avgRdBW;
@@ -1724,7 +1664,6 @@ class DRAMCtrl : public AbstractMemory
     Stats::Formula readRowHitRate;
     Stats::Formula writeRowHitRate;
     Stats::Formula avgGap;
-    Stats::Formula avgPackGap;
     Stats::Formula avgPushGap;
 
     // DRAM Power Calculation
